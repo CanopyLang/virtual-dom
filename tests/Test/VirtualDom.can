@@ -1,0 +1,600 @@
+module Test.VirtualDom exposing (main)
+
+import Basics exposing (..)
+import VirtualDom
+import Json.Encode as Encode
+import Json.Decode as Decode
+import Test exposing (Test, describe, test)
+import Expect
+
+
+main : Test
+main =
+    describe "VirtualDom"
+        [ textTests
+        , nodeTests
+        , nodeNSTests
+        , styleTests
+        , propertyTests
+        , attributeTests
+        , attributeNSTests
+        , onTests
+        , mapTests
+        , mapAttributeTests
+        , keyedNodeTests
+        , keyedNodeNSTests
+        , lazyTests
+        ]
+
+
+
+-- TEXT
+
+
+textTests : Test
+textTests =
+    describe "text"
+        [ test "creates a text node" <| \_ ->
+            VirtualDom.text "Hello"
+                |> expectNode
+        , test "empty text node" <| \_ ->
+            VirtualDom.text ""
+                |> expectNode
+        , test "text with special characters" <| \_ ->
+            VirtualDom.text "<script>alert('xss')</script>"
+                |> expectNode
+        , test "text with unicode" <| \_ ->
+            VirtualDom.text "Hello \u{1F600}"
+                |> expectNode
+        , test "text with newlines" <| \_ ->
+            VirtualDom.text "line1\nline2\nline3"
+                |> expectNode
+        ]
+
+
+
+-- NODE
+
+
+nodeTests : Test
+nodeTests =
+    describe "node"
+        [ test "creates an empty div" <| \_ ->
+            VirtualDom.node "div" [] []
+                |> expectNode
+        , test "creates a span" <| \_ ->
+            VirtualDom.node "span" [] []
+                |> expectNode
+        , test "node with single child" <| \_ ->
+            VirtualDom.node "div" [] [ VirtualDom.text "hello" ]
+                |> expectNode
+        , test "node with multiple children" <| \_ ->
+            VirtualDom.node "ul" []
+                [ VirtualDom.node "li" [] [ VirtualDom.text "one" ]
+                , VirtualDom.node "li" [] [ VirtualDom.text "two" ]
+                , VirtualDom.node "li" [] [ VirtualDom.text "three" ]
+                ]
+                |> expectNode
+        , test "deeply nested nodes" <| \_ ->
+            VirtualDom.node "div" []
+                [ VirtualDom.node "div" []
+                    [ VirtualDom.node "div" []
+                        [ VirtualDom.text "deep" ]
+                    ]
+                ]
+                |> expectNode
+        , test "node with attributes" <| \_ ->
+            VirtualDom.node "div"
+                [ VirtualDom.attribute "class" "container"
+                , VirtualDom.attribute "id" "main"
+                ]
+                [ VirtualDom.text "content" ]
+                |> expectNode
+        , test "node with mixed children" <| \_ ->
+            VirtualDom.node "div" []
+                [ VirtualDom.text "before"
+                , VirtualDom.node "span" [] [ VirtualDom.text "middle" ]
+                , VirtualDom.text "after"
+                ]
+                |> expectNode
+        ]
+
+
+
+-- NODE NS
+
+
+nodeNSTests : Test
+nodeNSTests =
+    describe "nodeNS"
+        [ test "creates an SVG node" <| \_ ->
+            VirtualDom.nodeNS "http://www.w3.org/2000/svg" "svg" [] []
+                |> expectNode
+        , test "creates an SVG path" <| \_ ->
+            VirtualDom.nodeNS "http://www.w3.org/2000/svg" "path"
+                [ VirtualDom.attribute "d" "M0 0 L10 10" ]
+                []
+                |> expectNode
+        , test "creates an SVG circle" <| \_ ->
+            VirtualDom.nodeNS "http://www.w3.org/2000/svg" "circle"
+                [ VirtualDom.attribute "cx" "50"
+                , VirtualDom.attribute "cy" "50"
+                , VirtualDom.attribute "r" "25"
+                ]
+                []
+                |> expectNode
+        , test "nested SVG nodes" <| \_ ->
+            VirtualDom.nodeNS "http://www.w3.org/2000/svg" "g" []
+                [ VirtualDom.nodeNS "http://www.w3.org/2000/svg" "rect" [] []
+                , VirtualDom.nodeNS "http://www.w3.org/2000/svg" "text" []
+                    [ VirtualDom.text "label" ]
+                ]
+                |> expectNode
+        , test "MathML namespace" <| \_ ->
+            VirtualDom.nodeNS "http://www.w3.org/1998/Math/MathML" "math" [] []
+                |> expectNode
+        ]
+
+
+
+-- STYLE
+
+
+styleTests : Test
+styleTests =
+    describe "style"
+        [ test "creates a style attribute" <| \_ ->
+            VirtualDom.style "color" "red"
+                |> expectAttribute
+        , test "background-color style" <| \_ ->
+            VirtualDom.style "backgroundColor" "blue"
+                |> expectAttribute
+        , test "dimension style" <| \_ ->
+            VirtualDom.style "width" "100px"
+                |> expectAttribute
+        , test "percentage style" <| \_ ->
+            VirtualDom.style "height" "50%"
+                |> expectAttribute
+        , test "display style" <| \_ ->
+            VirtualDom.style "display" "flex"
+                |> expectAttribute
+        , test "node with multiple styles" <| \_ ->
+            VirtualDom.node "div"
+                [ VirtualDom.style "color" "red"
+                , VirtualDom.style "fontSize" "16px"
+                , VirtualDom.style "margin" "0 auto"
+                ]
+                []
+                |> expectNode
+        ]
+
+
+
+-- PROPERTY
+
+
+propertyTests : Test
+propertyTests =
+    describe "property"
+        [ test "string property" <| \_ ->
+            VirtualDom.property "className" (Encode.string "container")
+                |> expectAttribute
+        , test "bool property" <| \_ ->
+            VirtualDom.property "checked" (Encode.bool True)
+                |> expectAttribute
+        , test "int property" <| \_ ->
+            VirtualDom.property "tabIndex" (Encode.int 0)
+                |> expectAttribute
+        , test "float property" <| \_ ->
+            VirtualDom.property "volume" (Encode.float 0.5)
+                |> expectAttribute
+        , test "null property" <| \_ ->
+            VirtualDom.property "value" Encode.null
+                |> expectAttribute
+        , test "object property" <| \_ ->
+            VirtualDom.property "dataset"
+                (Encode.object [ ( "key", Encode.string "value" ) ])
+                |> expectAttribute
+        , test "node with properties" <| \_ ->
+            VirtualDom.node "input"
+                [ VirtualDom.property "type" (Encode.string "text")
+                , VirtualDom.property "value" (Encode.string "hello")
+                , VirtualDom.property "disabled" (Encode.bool False)
+                ]
+                []
+                |> expectNode
+        ]
+
+
+
+-- ATTRIBUTE
+
+
+attributeTests : Test
+attributeTests =
+    describe "attribute"
+        [ test "id attribute" <| \_ ->
+            VirtualDom.attribute "id" "main"
+                |> expectAttribute
+        , test "class attribute" <| \_ ->
+            VirtualDom.attribute "class" "container"
+                |> expectAttribute
+        , test "data attribute" <| \_ ->
+            VirtualDom.attribute "data-value" "42"
+                |> expectAttribute
+        , test "role attribute" <| \_ ->
+            VirtualDom.attribute "role" "button"
+                |> expectAttribute
+        , test "aria attribute" <| \_ ->
+            VirtualDom.attribute "aria-label" "Close"
+                |> expectAttribute
+        , test "empty value attribute" <| \_ ->
+            VirtualDom.attribute "data-empty" ""
+                |> expectAttribute
+        , test "node with multiple attributes" <| \_ ->
+            VirtualDom.node "div"
+                [ VirtualDom.attribute "id" "app"
+                , VirtualDom.attribute "class" "wrapper"
+                , VirtualDom.attribute "data-page" "home"
+                ]
+                []
+                |> expectNode
+        ]
+
+
+
+-- ATTRIBUTE NS
+
+
+attributeNSTests : Test
+attributeNSTests =
+    describe "attributeNS"
+        [ test "xlink:href attribute" <| \_ ->
+            VirtualDom.attributeNS "http://www.w3.org/1999/xlink" "xlink:href" "#icon"
+                |> expectAttribute
+        , test "xml:lang attribute" <| \_ ->
+            VirtualDom.attributeNS "http://www.w3.org/XML/1998/namespace" "xml:lang" "en"
+                |> expectAttribute
+        , test "SVG node with namespaced attribute" <| \_ ->
+            VirtualDom.nodeNS "http://www.w3.org/2000/svg" "use"
+                [ VirtualDom.attributeNS "http://www.w3.org/1999/xlink" "xlink:href" "#my-icon" ]
+                []
+                |> expectNode
+        ]
+
+
+
+-- ON (EVENTS)
+
+
+onTests : Test
+onTests =
+    describe "on"
+        [ test "Normal handler" <| \_ ->
+            VirtualDom.on "click" (VirtualDom.Normal (Decode.succeed "clicked"))
+                |> expectAttribute
+        , test "Normal handler with decoder" <| \_ ->
+            VirtualDom.on "input"
+                (VirtualDom.Normal (Decode.field "target" (Decode.field "value" Decode.string)))
+                |> expectAttribute
+        , test "MayStopPropagation handler" <| \_ ->
+            VirtualDom.on "click"
+                (VirtualDom.MayStopPropagation (Decode.succeed ( "clicked", True )))
+                |> expectAttribute
+        , test "MayStopPropagation with False" <| \_ ->
+            VirtualDom.on "click"
+                (VirtualDom.MayStopPropagation (Decode.succeed ( "clicked", False )))
+                |> expectAttribute
+        , test "MayPreventDefault handler" <| \_ ->
+            VirtualDom.on "submit"
+                (VirtualDom.MayPreventDefault (Decode.succeed ( "submitted", True )))
+                |> expectAttribute
+        , test "MayPreventDefault with False" <| \_ ->
+            VirtualDom.on "submit"
+                (VirtualDom.MayPreventDefault (Decode.succeed ( "submitted", False )))
+                |> expectAttribute
+        , test "Custom handler" <| \_ ->
+            VirtualDom.on "click"
+                (VirtualDom.Custom
+                    (Decode.succeed
+                        { message = "clicked"
+                        , stopPropagation = True
+                        , preventDefault = True
+                        }
+                    )
+                )
+                |> expectAttribute
+        , test "Custom handler with no stop or prevent" <| \_ ->
+            VirtualDom.on "keydown"
+                (VirtualDom.Custom
+                    (Decode.succeed
+                        { message = "keypress"
+                        , stopPropagation = False
+                        , preventDefault = False
+                        }
+                    )
+                )
+                |> expectAttribute
+        , test "node with event handler" <| \_ ->
+            VirtualDom.node "button"
+                [ VirtualDom.on "click" (VirtualDom.Normal (Decode.succeed "click")) ]
+                [ VirtualDom.text "Click me" ]
+                |> expectNode
+        , test "node with multiple event handlers" <| \_ ->
+            VirtualDom.node "input"
+                [ VirtualDom.on "input"
+                    (VirtualDom.Normal (Decode.succeed "input"))
+                , VirtualDom.on "focus"
+                    (VirtualDom.Normal (Decode.succeed "focus"))
+                , VirtualDom.on "blur"
+                    (VirtualDom.Normal (Decode.succeed "blur"))
+                ]
+                []
+                |> expectNode
+        ]
+
+
+
+-- MAP
+
+
+mapTests : Test
+mapTests =
+    describe "map"
+        [ test "map with identity" <| \_ ->
+            VirtualDom.map identity (VirtualDom.text "hello")
+                |> expectNode
+        , test "map transforms message type" <| \_ ->
+            VirtualDom.map String.length (VirtualDom.text "hello")
+                |> expectNode
+        , test "map on node with children" <| \_ ->
+            VirtualDom.map (\x -> x + 1)
+                (VirtualDom.node "div" []
+                    [ VirtualDom.text "child" ]
+                )
+                |> expectNode
+        , test "map on node with event handlers" <| \_ ->
+            VirtualDom.map String.length
+                (VirtualDom.node "button"
+                    [ VirtualDom.on "click" (VirtualDom.Normal (Decode.succeed "click")) ]
+                    [ VirtualDom.text "Click" ]
+                )
+                |> expectNode
+        , test "nested map" <| \_ ->
+            VirtualDom.map (\x -> x * 2)
+                (VirtualDom.map (\x -> x + 1)
+                    (VirtualDom.text "hello")
+                )
+                |> expectNode
+        , test "map on complex tree" <| \_ ->
+            VirtualDom.map identity
+                (VirtualDom.node "div"
+                    [ VirtualDom.attribute "class" "wrapper" ]
+                    [ VirtualDom.node "h1" [] [ VirtualDom.text "Title" ]
+                    , VirtualDom.node "p" [] [ VirtualDom.text "Body" ]
+                    ]
+                )
+                |> expectNode
+        ]
+
+
+
+-- MAP ATTRIBUTE
+
+
+mapAttributeTests : Test
+mapAttributeTests =
+    describe "mapAttribute"
+        [ test "mapAttribute with identity on style" <| \_ ->
+            VirtualDom.mapAttribute identity (VirtualDom.style "color" "red")
+                |> expectAttribute
+        , test "mapAttribute with identity on attribute" <| \_ ->
+            VirtualDom.mapAttribute identity (VirtualDom.attribute "class" "box")
+                |> expectAttribute
+        , test "mapAttribute with identity on property" <| \_ ->
+            VirtualDom.mapAttribute identity (VirtualDom.property "value" (Encode.string "hi"))
+                |> expectAttribute
+        , test "mapAttribute transforms event handler type" <| \_ ->
+            VirtualDom.mapAttribute String.length
+                (VirtualDom.on "click" (VirtualDom.Normal (Decode.succeed "clicked")))
+                |> expectAttribute
+        , test "mapAttribute with identity on attributeNS" <| \_ ->
+            VirtualDom.mapAttribute identity
+                (VirtualDom.attributeNS "http://www.w3.org/1999/xlink" "xlink:href" "#icon")
+                |> expectAttribute
+        , test "mapAttribute with identity on Normal handler" <| \_ ->
+            VirtualDom.mapAttribute identity
+                (VirtualDom.on "click" (VirtualDom.Normal (Decode.succeed "msg")))
+                |> expectAttribute
+        , test "mapAttribute with identity on MayStopPropagation handler" <| \_ ->
+            VirtualDom.mapAttribute identity
+                (VirtualDom.on "click"
+                    (VirtualDom.MayStopPropagation (Decode.succeed ( "msg", True )))
+                )
+                |> expectAttribute
+        , test "mapAttribute with identity on MayPreventDefault handler" <| \_ ->
+            VirtualDom.mapAttribute identity
+                (VirtualDom.on "submit"
+                    (VirtualDom.MayPreventDefault (Decode.succeed ( "msg", True )))
+                )
+                |> expectAttribute
+        , test "mapAttribute with identity on Custom handler" <| \_ ->
+            VirtualDom.mapAttribute identity
+                (VirtualDom.on "click"
+                    (VirtualDom.Custom
+                        (Decode.succeed
+                            { message = "msg"
+                            , stopPropagation = False
+                            , preventDefault = False
+                            }
+                        )
+                    )
+                )
+                |> expectAttribute
+        ]
+
+
+
+-- KEYED NODE
+
+
+keyedNodeTests : Test
+keyedNodeTests =
+    describe "keyedNode"
+        [ test "empty keyed node" <| \_ ->
+            VirtualDom.keyedNode "ul" [] []
+                |> expectNode
+        , test "keyed node with single child" <| \_ ->
+            VirtualDom.keyedNode "ul" []
+                [ ( "item-1", VirtualDom.node "li" [] [ VirtualDom.text "one" ] ) ]
+                |> expectNode
+        , test "keyed node with multiple children" <| \_ ->
+            VirtualDom.keyedNode "ul" []
+                [ ( "item-1", VirtualDom.node "li" [] [ VirtualDom.text "one" ] )
+                , ( "item-2", VirtualDom.node "li" [] [ VirtualDom.text "two" ] )
+                , ( "item-3", VirtualDom.node "li" [] [ VirtualDom.text "three" ] )
+                ]
+                |> expectNode
+        , test "keyed node with attributes" <| \_ ->
+            VirtualDom.keyedNode "div"
+                [ VirtualDom.attribute "class" "list" ]
+                [ ( "a", VirtualDom.text "alpha" )
+                , ( "b", VirtualDom.text "beta" )
+                ]
+                |> expectNode
+        , test "keyed node with styles and events" <| \_ ->
+            VirtualDom.keyedNode "div"
+                [ VirtualDom.style "display" "flex"
+                , VirtualDom.on "click" (VirtualDom.Normal (Decode.succeed "click"))
+                ]
+                [ ( "child", VirtualDom.text "content" ) ]
+                |> expectNode
+        ]
+
+
+
+-- KEYED NODE NS
+
+
+keyedNodeNSTests : Test
+keyedNodeNSTests =
+    describe "keyedNodeNS"
+        [ test "SVG keyed group" <| \_ ->
+            VirtualDom.keyedNodeNS "http://www.w3.org/2000/svg" "g" [] []
+                |> expectNode
+        , test "SVG keyed group with children" <| \_ ->
+            VirtualDom.keyedNodeNS "http://www.w3.org/2000/svg" "g" []
+                [ ( "circle-1"
+                  , VirtualDom.nodeNS "http://www.w3.org/2000/svg" "circle"
+                      [ VirtualDom.attribute "r" "10" ]
+                      []
+                  )
+                , ( "circle-2"
+                  , VirtualDom.nodeNS "http://www.w3.org/2000/svg" "circle"
+                      [ VirtualDom.attribute "r" "20" ]
+                      []
+                  )
+                ]
+                |> expectNode
+        , test "SVG keyed group with attributes" <| \_ ->
+            VirtualDom.keyedNodeNS "http://www.w3.org/2000/svg" "g"
+                [ VirtualDom.attribute "transform" "translate(10,10)" ]
+                [ ( "rect", VirtualDom.nodeNS "http://www.w3.org/2000/svg" "rect" [] [] ) ]
+                |> expectNode
+        ]
+
+
+
+-- LAZY
+
+
+lazyTests : Test
+lazyTests =
+    describe "lazy"
+        [ test "lazy with text" <| \_ ->
+            VirtualDom.lazy VirtualDom.text "hello"
+                |> expectNode
+        , test "lazy with node builder" <| \_ ->
+            VirtualDom.lazy (\s -> VirtualDom.node "div" [] [ VirtualDom.text s ]) "content"
+                |> expectNode
+        , test "lazy2 with two arguments" <| \_ ->
+            VirtualDom.lazy2
+                (\a b -> VirtualDom.node "div" [] [ VirtualDom.text (a ++ b) ])
+                "hello"
+                " world"
+                |> expectNode
+        , test "lazy3 with three arguments" <| \_ ->
+            VirtualDom.lazy3
+                (\a b c -> VirtualDom.node "div" [] [ VirtualDom.text (a ++ b ++ c) ])
+                "a"
+                "b"
+                "c"
+                |> expectNode
+        , test "lazy4 with four arguments" <| \_ ->
+            VirtualDom.lazy4
+                (\a b c d -> VirtualDom.node "div" [] [ VirtualDom.text (a ++ b ++ c ++ d) ])
+                "a"
+                "b"
+                "c"
+                "d"
+                |> expectNode
+        , test "lazy5 with five arguments" <| \_ ->
+            VirtualDom.lazy5
+                (\a b c d e -> VirtualDom.node "div" [] [ VirtualDom.text (a ++ b ++ c ++ d ++ e) ])
+                "a"
+                "b"
+                "c"
+                "d"
+                "e"
+                |> expectNode
+        , test "lazy6 with six arguments" <| \_ ->
+            VirtualDom.lazy6
+                (\a b c d e f -> VirtualDom.node "div" [] [ VirtualDom.text (a ++ b ++ c ++ d ++ e ++ f) ])
+                "a"
+                "b"
+                "c"
+                "d"
+                "e"
+                "f"
+                |> expectNode
+        , test "lazy7 with seven arguments" <| \_ ->
+            VirtualDom.lazy7
+                (\a b c d e f g -> VirtualDom.node "div" [] [ VirtualDom.text (a ++ b ++ c ++ d ++ e ++ f ++ g) ])
+                "a"
+                "b"
+                "c"
+                "d"
+                "e"
+                "f"
+                "g"
+                |> expectNode
+        , test "lazy8 with eight arguments" <| \_ ->
+            VirtualDom.lazy8
+                (\a b c d e f g h -> VirtualDom.node "div" [] [ VirtualDom.text (a ++ b ++ c ++ d ++ e ++ f ++ g ++ h) ])
+                "a"
+                "b"
+                "c"
+                "d"
+                "e"
+                "f"
+                "g"
+                "h"
+                |> expectNode
+        , test "lazy with identity function" <| \_ ->
+            VirtualDom.lazy identity (VirtualDom.text "pass-through")
+                |> expectNode
+        ]
+
+
+
+-- HELPERS
+
+
+expectNode : VirtualDom.Node msg -> Expect.Expectation
+expectNode _ =
+    Expect.pass
+
+
+expectAttribute : VirtualDom.Attribute msg -> Expect.Expectation
+expectAttribute _ =
+    Expect.pass
