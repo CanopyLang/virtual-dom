@@ -8,6 +8,7 @@ module VirtualDom exposing
   , map, mapAttribute
   , keyedNode, keyedNodeNS
   , lazy, lazy2, lazy3, lazy4, lazy5, lazy6, lazy7, lazy8
+  , toHandlerInt
   )
 
 {-| API to the core diffing algorithm. Can serve as a foundation for libraries

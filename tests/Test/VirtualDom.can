@@ -28,6 +28,7 @@ main =
         , mapAttributeTests
         , xssSanitizationTests
         , lazyTests
+        , toHandlerIntTests
         ]
 
 
@@ -600,4 +601,34 @@ lazyTests =
         , test "lazy8 produces a node when forced" <| \_ ->
             TestHelper.isElementNode (VirtualDom.lazy8 (\_ _ _ _ _ _ _ _ -> VirtualDom.node "div" [] []) () () () () () () () ())
                 |> Expect.equal True
+        ]
+
+
+
+-- TO HANDLER INT
+
+
+toHandlerIntTests : Test
+toHandlerIntTests =
+    describe "toHandlerInt"
+        [ test "Normal handler returns 0" <| \_ ->
+            VirtualDom.toHandlerInt (VirtualDom.Normal (Decode.succeed "msg"))
+                |> Expect.equal 0
+        , test "MayStopPropagation handler returns 1" <| \_ ->
+            VirtualDom.toHandlerInt (VirtualDom.MayStopPropagation (Decode.succeed ( "msg", True )))
+                |> Expect.equal 1
+        , test "MayPreventDefault handler returns 2" <| \_ ->
+            VirtualDom.toHandlerInt (VirtualDom.MayPreventDefault (Decode.succeed ( "msg", True )))
+                |> Expect.equal 2
+        , test "Custom handler returns 3" <| \_ ->
+            VirtualDom.toHandlerInt
+                (VirtualDom.Custom
+                    (Decode.succeed
+                        { message = "msg"
+                        , stopPropagation = False
+                        , preventDefault = False
+                        }
+                    )
+                )
+                |> Expect.equal 3
         ]
