@@ -4,6 +4,9 @@ import Basics exposing (..)
 import VirtualDom
 import Json.Encode as Encode
 import Json.Decode as Decode
+import Maybe exposing (Maybe(..))
+import String
+import TestHelper
 import Test exposing (Test, describe, test)
 import Expect
 
@@ -19,10 +22,11 @@ main =
         , attributeTests
         , attributeNSTests
         , onTests
-        , mapTests
-        , mapAttributeTests
         , keyedNodeTests
         , keyedNodeNSTests
+        , mapTests
+        , mapAttributeTests
+        , xssSanitizationTests
         , lazyTests
         ]
 
@@ -34,21 +38,34 @@ main =
 textTests : Test
 textTests =
     describe "text"
-        [ test "creates a text node" <| \_ ->
-            VirtualDom.text "Hello"
-                |> expectNode
-        , test "empty text node" <| \_ ->
-            VirtualDom.text ""
-                |> expectNode
-        , test "text with special characters" <| \_ ->
-            VirtualDom.text "<script>alert('xss')</script>"
-                |> expectNode
-        , test "text with unicode" <| \_ ->
-            VirtualDom.text "Hello \u{1F600}"
-                |> expectNode
-        , test "text with newlines" <| \_ ->
-            VirtualDom.text "line1\nline2\nline3"
-                |> expectNode
+        [ test "creates a text node with correct content" <| \_ ->
+            TestHelper.getText (VirtualDom.text "Hello")
+                |> Expect.equal (Just "Hello")
+        , test "empty text node has empty content" <| \_ ->
+            TestHelper.getText (VirtualDom.text "")
+                |> Expect.equal (Just "")
+        , test "text with special characters preserves content" <| \_ ->
+            TestHelper.getText (VirtualDom.text "<script>alert('xss')</script>")
+                |> Expect.equal (Just "<script>alert('xss')</script>")
+        , test "text with unicode preserves content" <| \_ ->
+            TestHelper.getText (VirtualDom.text "Hello \u{1F600}")
+                |> Expect.equal (Just "Hello \u{1F600}")
+        , test "text with newlines preserves content" <| \_ ->
+            TestHelper.getText (VirtualDom.text "line1\nline2\nline3")
+                |> Expect.equal (Just "line1\nline2\nline3")
+        , test "text node is a text node" <| \_ ->
+            TestHelper.isTextNode (VirtualDom.text "Hello")
+                |> Expect.equal True
+        , test "text node is not an element node" <| \_ ->
+            TestHelper.isElementNode (VirtualDom.text "Hello")
+                |> Expect.equal False
+        , test "text node has no tag" <| \_ ->
+            TestHelper.getTag (VirtualDom.text "Hello")
+                |> Expect.equal Nothing
+        , test "different text content" <| \_ ->
+            Expect.notEqual
+                (TestHelper.getText (VirtualDom.text "Hello"))
+                (TestHelper.getText (VirtualDom.text "World"))
         ]
 
 
@@ -59,44 +76,54 @@ textTests =
 nodeTests : Test
 nodeTests =
     describe "node"
-        [ test "creates an empty div" <| \_ ->
-            VirtualDom.node "div" [] []
-                |> expectNode
-        , test "creates a span" <| \_ ->
-            VirtualDom.node "span" [] []
-                |> expectNode
-        , test "node with single child" <| \_ ->
-            VirtualDom.node "div" [] [ VirtualDom.text "hello" ]
-                |> expectNode
-        , test "node with multiple children" <| \_ ->
-            VirtualDom.node "ul" []
-                [ VirtualDom.node "li" [] [ VirtualDom.text "one" ]
-                , VirtualDom.node "li" [] [ VirtualDom.text "two" ]
-                , VirtualDom.node "li" [] [ VirtualDom.text "three" ]
-                ]
-                |> expectNode
-        , test "deeply nested nodes" <| \_ ->
-            VirtualDom.node "div" []
-                [ VirtualDom.node "div" []
-                    [ VirtualDom.node "div" []
-                        [ VirtualDom.text "deep" ]
+        [ test "div has correct tag" <| \_ ->
+            TestHelper.getTag (VirtualDom.node "div" [] [])
+                |> Expect.equal (Just "div")
+        , test "span has correct tag" <| \_ ->
+            TestHelper.getTag (VirtualDom.node "span" [] [])
+                |> Expect.equal (Just "span")
+        , test "div is an element node" <| \_ ->
+            TestHelper.isElementNode (VirtualDom.node "div" [] [])
+                |> Expect.equal True
+        , test "div is not a text node" <| \_ ->
+            TestHelper.isTextNode (VirtualDom.node "div" [] [])
+                |> Expect.equal False
+        , test "div is not a keyed node" <| \_ ->
+            TestHelper.isKeyedNode (VirtualDom.node "div" [] [])
+                |> Expect.equal False
+        , test "ul has correct tag" <| \_ ->
+            TestHelper.getTag (VirtualDom.node "ul" [] [])
+                |> Expect.equal (Just "ul")
+        , test "input has correct tag" <| \_ ->
+            TestHelper.getTag (VirtualDom.node "input" [] [])
+                |> Expect.equal (Just "input")
+        , test "node with attributes still has correct tag" <| \_ ->
+            TestHelper.getTag
+                (VirtualDom.node "div"
+                    [ VirtualDom.attribute "class" "container"
+                    , VirtualDom.attribute "id" "main"
                     ]
-                ]
-                |> expectNode
-        , test "node with attributes" <| \_ ->
-            VirtualDom.node "div"
-                [ VirtualDom.attribute "class" "container"
-                , VirtualDom.attribute "id" "main"
-                ]
-                [ VirtualDom.text "content" ]
-                |> expectNode
-        , test "node with mixed children" <| \_ ->
-            VirtualDom.node "div" []
-                [ VirtualDom.text "before"
-                , VirtualDom.node "span" [] [ VirtualDom.text "middle" ]
-                , VirtualDom.text "after"
-                ]
-                |> expectNode
+                    [ VirtualDom.text "content" ]
+                )
+                |> Expect.equal (Just "div")
+        , test "node with children still has correct tag" <| \_ ->
+            TestHelper.getTag
+                (VirtualDom.node "ul" []
+                    [ VirtualDom.node "li" [] [ VirtualDom.text "one" ]
+                    , VirtualDom.node "li" [] [ VirtualDom.text "two" ]
+                    ]
+                )
+                |> Expect.equal (Just "ul")
+        , test "different tags produce different results" <| \_ ->
+            Expect.notEqual
+                (TestHelper.getTag (VirtualDom.node "div" [] []))
+                (TestHelper.getTag (VirtualDom.node "span" [] []))
+        , test "node has no text content" <| \_ ->
+            TestHelper.getText (VirtualDom.node "div" [] [])
+                |> Expect.equal Nothing
+        , test "node has no namespace" <| \_ ->
+            TestHelper.getNamespace (VirtualDom.node "div" [] [])
+                |> Expect.equal Nothing
         ]
 
 
@@ -107,32 +134,45 @@ nodeTests =
 nodeNSTests : Test
 nodeNSTests =
     describe "nodeNS"
-        [ test "creates an SVG node" <| \_ ->
-            VirtualDom.nodeNS "http://www.w3.org/2000/svg" "svg" [] []
-                |> expectNode
-        , test "creates an SVG path" <| \_ ->
-            VirtualDom.nodeNS "http://www.w3.org/2000/svg" "path"
-                [ VirtualDom.attribute "d" "M0 0 L10 10" ]
-                []
-                |> expectNode
-        , test "creates an SVG circle" <| \_ ->
-            VirtualDom.nodeNS "http://www.w3.org/2000/svg" "circle"
-                [ VirtualDom.attribute "cx" "50"
-                , VirtualDom.attribute "cy" "50"
-                , VirtualDom.attribute "r" "25"
-                ]
-                []
-                |> expectNode
-        , test "nested SVG nodes" <| \_ ->
-            VirtualDom.nodeNS "http://www.w3.org/2000/svg" "g" []
-                [ VirtualDom.nodeNS "http://www.w3.org/2000/svg" "rect" [] []
-                , VirtualDom.nodeNS "http://www.w3.org/2000/svg" "text" []
-                    [ VirtualDom.text "label" ]
-                ]
-                |> expectNode
+        [ test "SVG svg has correct tag" <| \_ ->
+            TestHelper.getTag
+                (VirtualDom.nodeNS "http://www.w3.org/2000/svg" "svg" [] [])
+                |> Expect.equal (Just "svg")
+        , test "SVG path has correct tag" <| \_ ->
+            TestHelper.getTag
+                (VirtualDom.nodeNS "http://www.w3.org/2000/svg" "path"
+                    [ VirtualDom.attribute "d" "M0 0 L10 10" ]
+                    []
+                )
+                |> Expect.equal (Just "path")
+        , test "SVG circle has correct tag" <| \_ ->
+            TestHelper.getTag
+                (VirtualDom.nodeNS "http://www.w3.org/2000/svg" "circle"
+                    [ VirtualDom.attribute "cx" "50"
+                    , VirtualDom.attribute "cy" "50"
+                    , VirtualDom.attribute "r" "25"
+                    ]
+                    []
+                )
+                |> Expect.equal (Just "circle")
+        , test "SVG node has SVG namespace" <| \_ ->
+            TestHelper.getNamespace
+                (VirtualDom.nodeNS "http://www.w3.org/2000/svg" "svg" [] [])
+                |> Expect.equal (Just "http://www.w3.org/2000/svg")
+        , test "SVG node is an element node" <| \_ ->
+            TestHelper.isElementNode
+                (VirtualDom.nodeNS "http://www.w3.org/2000/svg" "svg" [] [])
+                |> Expect.equal True
         , test "MathML namespace" <| \_ ->
-            VirtualDom.nodeNS "http://www.w3.org/1998/Math/MathML" "math" [] []
-                |> expectNode
+            TestHelper.getNamespace
+                (VirtualDom.nodeNS "http://www.w3.org/1998/Math/MathML" "math" [] [])
+                |> Expect.equal (Just "http://www.w3.org/1998/Math/MathML")
+        , test "different namespaces produce different results" <| \_ ->
+            Expect.notEqual
+                (TestHelper.getNamespace
+                    (VirtualDom.nodeNS "http://www.w3.org/2000/svg" "g" [] []))
+                (TestHelper.getNamespace
+                    (VirtualDom.nodeNS "http://www.w3.org/1998/Math/MathML" "g" [] []))
         ]
 
 
@@ -143,29 +183,44 @@ nodeNSTests =
 styleTests : Test
 styleTests =
     describe "style"
-        [ test "creates a style attribute" <| \_ ->
-            VirtualDom.style "color" "red"
-                |> expectAttribute
-        , test "background-color style" <| \_ ->
-            VirtualDom.style "backgroundColor" "blue"
-                |> expectAttribute
-        , test "dimension style" <| \_ ->
-            VirtualDom.style "width" "100px"
-                |> expectAttribute
+        [ test "style has type tag a__1_STYLE" <| \_ ->
+            TestHelper.getAttrType (VirtualDom.style "color" "red")
+                |> Expect.equal "a__1_STYLE"
+        , test "style has correct key" <| \_ ->
+            TestHelper.getAttrKey (VirtualDom.style "color" "red")
+                |> Expect.equal "color"
+        , test "style has correct value" <| \_ ->
+            TestHelper.getAttrValue (VirtualDom.style "color" "red")
+                |> Expect.equal "red"
+        , test "different style keys" <| \_ ->
+            Expect.notEqual
+                (TestHelper.getAttrKey (VirtualDom.style "color" "red"))
+                (TestHelper.getAttrKey (VirtualDom.style "backgroundColor" "red"))
+        , test "different style values" <| \_ ->
+            Expect.notEqual
+                (TestHelper.getAttrValue (VirtualDom.style "color" "red"))
+                (TestHelper.getAttrValue (VirtualDom.style "color" "blue"))
+        , test "backgroundColor style key" <| \_ ->
+            TestHelper.getAttrKey (VirtualDom.style "backgroundColor" "blue")
+                |> Expect.equal "backgroundColor"
+        , test "width style" <| \_ ->
+            TestHelper.getAttrValue (VirtualDom.style "width" "100px")
+                |> Expect.equal "100px"
         , test "percentage style" <| \_ ->
-            VirtualDom.style "height" "50%"
-                |> expectAttribute
-        , test "display style" <| \_ ->
-            VirtualDom.style "display" "flex"
-                |> expectAttribute
-        , test "node with multiple styles" <| \_ ->
-            VirtualDom.node "div"
-                [ VirtualDom.style "color" "red"
-                , VirtualDom.style "fontSize" "16px"
-                , VirtualDom.style "margin" "0 auto"
-                ]
-                []
-                |> expectNode
+            TestHelper.getAttrValue (VirtualDom.style "height" "50%")
+                |> Expect.equal "50%"
+        , test "display flex style" <| \_ ->
+            TestHelper.getAttrValue (VirtualDom.style "display" "flex")
+                |> Expect.equal "flex"
+        , test "node with styles still has correct tag" <| \_ ->
+            TestHelper.getTag
+                (VirtualDom.node "div"
+                    [ VirtualDom.style "color" "red"
+                    , VirtualDom.style "fontSize" "16px"
+                    ]
+                    []
+                )
+                |> Expect.equal (Just "div")
         ]
 
 
@@ -176,33 +231,31 @@ styleTests =
 propertyTests : Test
 propertyTests =
     describe "property"
-        [ test "string property" <| \_ ->
-            VirtualDom.property "className" (Encode.string "container")
-                |> expectAttribute
-        , test "bool property" <| \_ ->
-            VirtualDom.property "checked" (Encode.bool True)
-                |> expectAttribute
-        , test "int property" <| \_ ->
-            VirtualDom.property "tabIndex" (Encode.int 0)
-                |> expectAttribute
-        , test "float property" <| \_ ->
-            VirtualDom.property "volume" (Encode.float 0.5)
-                |> expectAttribute
-        , test "null property" <| \_ ->
-            VirtualDom.property "value" Encode.null
-                |> expectAttribute
-        , test "object property" <| \_ ->
-            VirtualDom.property "dataset"
-                (Encode.object [ ( "key", Encode.string "value" ) ])
-                |> expectAttribute
-        , test "node with properties" <| \_ ->
-            VirtualDom.node "input"
-                [ VirtualDom.property "type" (Encode.string "text")
-                , VirtualDom.property "value" (Encode.string "hello")
-                , VirtualDom.property "disabled" (Encode.bool False)
-                ]
-                []
-                |> expectNode
+        [ test "property has type tag a__1_PROP" <| \_ ->
+            TestHelper.getAttrType (VirtualDom.property "className" (Encode.string "container"))
+                |> Expect.equal "a__1_PROP"
+        , test "property has correct key" <| \_ ->
+            TestHelper.getAttrKey (VirtualDom.property "className" (Encode.string "container"))
+                |> Expect.equal "className"
+        , test "different property keys" <| \_ ->
+            Expect.notEqual
+                (TestHelper.getAttrKey (VirtualDom.property "className" (Encode.string "a")))
+                (TestHelper.getAttrKey (VirtualDom.property "id" (Encode.string "a")))
+        , test "checked property has correct key" <| \_ ->
+            TestHelper.getAttrKey (VirtualDom.property "checked" (Encode.bool True))
+                |> Expect.equal "checked"
+        , test "tabIndex property has correct key" <| \_ ->
+            TestHelper.getAttrKey (VirtualDom.property "tabIndex" (Encode.int 0))
+                |> Expect.equal "tabIndex"
+        , test "node with properties still has correct tag" <| \_ ->
+            TestHelper.getTag
+                (VirtualDom.node "input"
+                    [ VirtualDom.property "type" (Encode.string "text")
+                    , VirtualDom.property "value" (Encode.string "hello")
+                    ]
+                    []
+                )
+                |> Expect.equal (Just "input")
         ]
 
 
@@ -213,32 +266,41 @@ propertyTests =
 attributeTests : Test
 attributeTests =
     describe "attribute"
-        [ test "id attribute" <| \_ ->
-            VirtualDom.attribute "id" "main"
-                |> expectAttribute
+        [ test "attribute has type tag a__1_ATTR" <| \_ ->
+            TestHelper.getAttrType (VirtualDom.attribute "id" "main")
+                |> Expect.equal "a__1_ATTR"
+        , test "attribute has correct key" <| \_ ->
+            TestHelper.getAttrKey (VirtualDom.attribute "id" "main")
+                |> Expect.equal "id"
+        , test "attribute has correct value" <| \_ ->
+            TestHelper.getAttrValue (VirtualDom.attribute "id" "main")
+                |> Expect.equal "main"
         , test "class attribute" <| \_ ->
-            VirtualDom.attribute "class" "container"
-                |> expectAttribute
+            TestHelper.getAttrValue (VirtualDom.attribute "class" "container")
+                |> Expect.equal "container"
         , test "data attribute" <| \_ ->
-            VirtualDom.attribute "data-value" "42"
-                |> expectAttribute
+            TestHelper.getAttrKey (VirtualDom.attribute "data-value" "42")
+                |> Expect.equal "data-value"
+        , test "data attribute value" <| \_ ->
+            TestHelper.getAttrValue (VirtualDom.attribute "data-value" "42")
+                |> Expect.equal "42"
         , test "role attribute" <| \_ ->
-            VirtualDom.attribute "role" "button"
-                |> expectAttribute
+            TestHelper.getAttrValue (VirtualDom.attribute "role" "button")
+                |> Expect.equal "button"
         , test "aria attribute" <| \_ ->
-            VirtualDom.attribute "aria-label" "Close"
-                |> expectAttribute
+            TestHelper.getAttrValue (VirtualDom.attribute "aria-label" "Close")
+                |> Expect.equal "Close"
         , test "empty value attribute" <| \_ ->
-            VirtualDom.attribute "data-empty" ""
-                |> expectAttribute
-        , test "node with multiple attributes" <| \_ ->
-            VirtualDom.node "div"
-                [ VirtualDom.attribute "id" "app"
-                , VirtualDom.attribute "class" "wrapper"
-                , VirtualDom.attribute "data-page" "home"
-                ]
-                []
-                |> expectNode
+            TestHelper.getAttrValue (VirtualDom.attribute "data-empty" "")
+                |> Expect.equal ""
+        , test "different attribute values" <| \_ ->
+            Expect.notEqual
+                (TestHelper.getAttrValue (VirtualDom.attribute "id" "main"))
+                (TestHelper.getAttrValue (VirtualDom.attribute "id" "sidebar"))
+        , test "different attribute names" <| \_ ->
+            Expect.notEqual
+                (TestHelper.getAttrKey (VirtualDom.attribute "id" "main"))
+                (TestHelper.getAttrKey (VirtualDom.attribute "class" "main"))
         ]
 
 
@@ -249,17 +311,35 @@ attributeTests =
 attributeNSTests : Test
 attributeNSTests =
     describe "attributeNS"
-        [ test "xlink:href attribute" <| \_ ->
-            VirtualDom.attributeNS "http://www.w3.org/1999/xlink" "xlink:href" "#icon"
-                |> expectAttribute
+        [ test "attributeNS has type tag a__1_ATTR_NS" <| \_ ->
+            TestHelper.getAttrType
+                (VirtualDom.attributeNS "http://www.w3.org/1999/xlink" "xlink:href" "#icon")
+                |> Expect.equal "a__1_ATTR_NS"
+        , test "xlink:href has correct key" <| \_ ->
+            TestHelper.getAttrKey
+                (VirtualDom.attributeNS "http://www.w3.org/1999/xlink" "xlink:href" "#icon")
+                |> Expect.equal "xlink:href"
+        , test "xlink:href has correct value" <| \_ ->
+            TestHelper.getAttrValue
+                (VirtualDom.attributeNS "http://www.w3.org/1999/xlink" "xlink:href" "#icon")
+                |> Expect.equal "#icon"
         , test "xml:lang attribute" <| \_ ->
-            VirtualDom.attributeNS "http://www.w3.org/XML/1998/namespace" "xml:lang" "en"
-                |> expectAttribute
-        , test "SVG node with namespaced attribute" <| \_ ->
-            VirtualDom.nodeNS "http://www.w3.org/2000/svg" "use"
-                [ VirtualDom.attributeNS "http://www.w3.org/1999/xlink" "xlink:href" "#my-icon" ]
-                []
-                |> expectNode
+            TestHelper.getAttrValue
+                (VirtualDom.attributeNS "http://www.w3.org/XML/1998/namespace" "xml:lang" "en")
+                |> Expect.equal "en"
+        , test "different namespaced attribute values" <| \_ ->
+            Expect.notEqual
+                (TestHelper.getAttrValue
+                    (VirtualDom.attributeNS "http://www.w3.org/1999/xlink" "xlink:href" "#a"))
+                (TestHelper.getAttrValue
+                    (VirtualDom.attributeNS "http://www.w3.org/1999/xlink" "xlink:href" "#b"))
+        , test "SVG node with namespaced attribute has correct tag" <| \_ ->
+            TestHelper.getTag
+                (VirtualDom.nodeNS "http://www.w3.org/2000/svg" "use"
+                    [ VirtualDom.attributeNS "http://www.w3.org/1999/xlink" "xlink:href" "#my-icon" ]
+                    []
+                )
+                |> Expect.equal (Just "use")
         ]
 
 
@@ -270,167 +350,58 @@ attributeNSTests =
 onTests : Test
 onTests =
     describe "on"
-        [ test "Normal handler" <| \_ ->
-            VirtualDom.on "click" (VirtualDom.Normal (Decode.succeed "clicked"))
-                |> expectAttribute
-        , test "Normal handler with decoder" <| \_ ->
-            VirtualDom.on "input"
-                (VirtualDom.Normal (Decode.field "target" (Decode.field "value" Decode.string)))
-                |> expectAttribute
-        , test "MayStopPropagation handler" <| \_ ->
-            VirtualDom.on "click"
-                (VirtualDom.MayStopPropagation (Decode.succeed ( "clicked", True )))
-                |> expectAttribute
-        , test "MayStopPropagation with False" <| \_ ->
-            VirtualDom.on "click"
-                (VirtualDom.MayStopPropagation (Decode.succeed ( "clicked", False )))
-                |> expectAttribute
-        , test "MayPreventDefault handler" <| \_ ->
-            VirtualDom.on "submit"
-                (VirtualDom.MayPreventDefault (Decode.succeed ( "submitted", True )))
-                |> expectAttribute
-        , test "MayPreventDefault with False" <| \_ ->
-            VirtualDom.on "submit"
-                (VirtualDom.MayPreventDefault (Decode.succeed ( "submitted", False )))
-                |> expectAttribute
-        , test "Custom handler" <| \_ ->
-            VirtualDom.on "click"
-                (VirtualDom.Custom
-                    (Decode.succeed
-                        { message = "clicked"
-                        , stopPropagation = True
-                        , preventDefault = True
-                        }
-                    )
-                )
-                |> expectAttribute
-        , test "Custom handler with no stop or prevent" <| \_ ->
-            VirtualDom.on "keydown"
-                (VirtualDom.Custom
-                    (Decode.succeed
-                        { message = "keypress"
-                        , stopPropagation = False
-                        , preventDefault = False
-                        }
-                    )
-                )
-                |> expectAttribute
-        , test "node with event handler" <| \_ ->
-            VirtualDom.node "button"
-                [ VirtualDom.on "click" (VirtualDom.Normal (Decode.succeed "click")) ]
-                [ VirtualDom.text "Click me" ]
-                |> expectNode
-        , test "node with multiple event handlers" <| \_ ->
-            VirtualDom.node "input"
-                [ VirtualDom.on "input"
-                    (VirtualDom.Normal (Decode.succeed "input"))
-                , VirtualDom.on "focus"
-                    (VirtualDom.Normal (Decode.succeed "focus"))
-                , VirtualDom.on "blur"
-                    (VirtualDom.Normal (Decode.succeed "blur"))
-                ]
-                []
-                |> expectNode
-        ]
-
-
-
--- MAP
-
-
-mapTests : Test
-mapTests =
-    describe "map"
-        [ test "map with identity" <| \_ ->
-            VirtualDom.map identity (VirtualDom.text "hello")
-                |> expectNode
-        , test "map transforms message type" <| \_ ->
-            VirtualDom.map String.length (VirtualDom.text "hello")
-                |> expectNode
-        , test "map on node with children" <| \_ ->
-            VirtualDom.map (\x -> x + 1)
-                (VirtualDom.node "div" []
-                    [ VirtualDom.text "child" ]
-                )
-                |> expectNode
-        , test "map on node with event handlers" <| \_ ->
-            VirtualDom.map String.length
-                (VirtualDom.node "button"
-                    [ VirtualDom.on "click" (VirtualDom.Normal (Decode.succeed "click")) ]
-                    [ VirtualDom.text "Click" ]
-                )
-                |> expectNode
-        , test "nested map" <| \_ ->
-            VirtualDom.map (\x -> x * 2)
-                (VirtualDom.map (\x -> x + 1)
-                    (VirtualDom.text "hello")
-                )
-                |> expectNode
-        , test "map on complex tree" <| \_ ->
-            VirtualDom.map identity
-                (VirtualDom.node "div"
-                    [ VirtualDom.attribute "class" "wrapper" ]
-                    [ VirtualDom.node "h1" [] [ VirtualDom.text "Title" ]
-                    , VirtualDom.node "p" [] [ VirtualDom.text "Body" ]
-                    ]
-                )
-                |> expectNode
-        ]
-
-
-
--- MAP ATTRIBUTE
-
-
-mapAttributeTests : Test
-mapAttributeTests =
-    describe "mapAttribute"
-        [ test "mapAttribute with identity on style" <| \_ ->
-            VirtualDom.mapAttribute identity (VirtualDom.style "color" "red")
-                |> expectAttribute
-        , test "mapAttribute with identity on attribute" <| \_ ->
-            VirtualDom.mapAttribute identity (VirtualDom.attribute "class" "box")
-                |> expectAttribute
-        , test "mapAttribute with identity on property" <| \_ ->
-            VirtualDom.mapAttribute identity (VirtualDom.property "value" (Encode.string "hi"))
-                |> expectAttribute
-        , test "mapAttribute transforms event handler type" <| \_ ->
-            VirtualDom.mapAttribute String.length
+        [ test "event handler has type tag a__1_EVENT" <| \_ ->
+            TestHelper.getAttrType
                 (VirtualDom.on "click" (VirtualDom.Normal (Decode.succeed "clicked")))
-                |> expectAttribute
-        , test "mapAttribute with identity on attributeNS" <| \_ ->
-            VirtualDom.mapAttribute identity
-                (VirtualDom.attributeNS "http://www.w3.org/1999/xlink" "xlink:href" "#icon")
-                |> expectAttribute
-        , test "mapAttribute with identity on Normal handler" <| \_ ->
-            VirtualDom.mapAttribute identity
-                (VirtualDom.on "click" (VirtualDom.Normal (Decode.succeed "msg")))
-                |> expectAttribute
-        , test "mapAttribute with identity on MayStopPropagation handler" <| \_ ->
-            VirtualDom.mapAttribute identity
+                |> Expect.equal "a__1_EVENT"
+        , test "click handler has correct event name" <| \_ ->
+            TestHelper.getAttrKey
+                (VirtualDom.on "click" (VirtualDom.Normal (Decode.succeed "clicked")))
+                |> Expect.equal "click"
+        , test "input handler has correct event name" <| \_ ->
+            TestHelper.getAttrKey
+                (VirtualDom.on "input"
+                    (VirtualDom.Normal (Decode.field "target" (Decode.field "value" Decode.string)))
+                )
+                |> Expect.equal "input"
+        , test "MayStopPropagation handler has correct event name" <| \_ ->
+            TestHelper.getAttrKey
                 (VirtualDom.on "click"
-                    (VirtualDom.MayStopPropagation (Decode.succeed ( "msg", True )))
+                    (VirtualDom.MayStopPropagation (Decode.succeed ( "clicked", True )))
                 )
-                |> expectAttribute
-        , test "mapAttribute with identity on MayPreventDefault handler" <| \_ ->
-            VirtualDom.mapAttribute identity
+                |> Expect.equal "click"
+        , test "MayPreventDefault handler has correct event name" <| \_ ->
+            TestHelper.getAttrKey
                 (VirtualDom.on "submit"
-                    (VirtualDom.MayPreventDefault (Decode.succeed ( "msg", True )))
+                    (VirtualDom.MayPreventDefault (Decode.succeed ( "submitted", True )))
                 )
-                |> expectAttribute
-        , test "mapAttribute with identity on Custom handler" <| \_ ->
-            VirtualDom.mapAttribute identity
+                |> Expect.equal "submit"
+        , test "Custom handler has correct event name" <| \_ ->
+            TestHelper.getAttrKey
                 (VirtualDom.on "click"
                     (VirtualDom.Custom
                         (Decode.succeed
-                            { message = "msg"
-                            , stopPropagation = False
-                            , preventDefault = False
+                            { message = "clicked"
+                            , stopPropagation = True
+                            , preventDefault = True
                             }
                         )
                     )
                 )
-                |> expectAttribute
+                |> Expect.equal "click"
+        , test "different event names produce different keys" <| \_ ->
+            Expect.notEqual
+                (TestHelper.getAttrKey
+                    (VirtualDom.on "click" (VirtualDom.Normal (Decode.succeed "msg"))))
+                (TestHelper.getAttrKey
+                    (VirtualDom.on "submit" (VirtualDom.Normal (Decode.succeed "msg"))))
+        , test "node with event handler has correct tag" <| \_ ->
+            TestHelper.getTag
+                (VirtualDom.node "button"
+                    [ VirtualDom.on "click" (VirtualDom.Normal (Decode.succeed "click")) ]
+                    [ VirtualDom.text "Click me" ]
+                )
+                |> Expect.equal (Just "button")
         ]
 
 
@@ -441,34 +412,29 @@ mapAttributeTests =
 keyedNodeTests : Test
 keyedNodeTests =
     describe "keyedNode"
-        [ test "empty keyed node" <| \_ ->
-            VirtualDom.keyedNode "ul" [] []
-                |> expectNode
-        , test "keyed node with single child" <| \_ ->
-            VirtualDom.keyedNode "ul" []
-                [ ( "item-1", VirtualDom.node "li" [] [ VirtualDom.text "one" ] ) ]
-                |> expectNode
-        , test "keyed node with multiple children" <| \_ ->
-            VirtualDom.keyedNode "ul" []
-                [ ( "item-1", VirtualDom.node "li" [] [ VirtualDom.text "one" ] )
-                , ( "item-2", VirtualDom.node "li" [] [ VirtualDom.text "two" ] )
-                , ( "item-3", VirtualDom.node "li" [] [ VirtualDom.text "three" ] )
-                ]
-                |> expectNode
-        , test "keyed node with attributes" <| \_ ->
-            VirtualDom.keyedNode "div"
-                [ VirtualDom.attribute "class" "list" ]
-                [ ( "a", VirtualDom.text "alpha" )
-                , ( "b", VirtualDom.text "beta" )
-                ]
-                |> expectNode
-        , test "keyed node with styles and events" <| \_ ->
-            VirtualDom.keyedNode "div"
-                [ VirtualDom.style "display" "flex"
-                , VirtualDom.on "click" (VirtualDom.Normal (Decode.succeed "click"))
-                ]
-                [ ( "child", VirtualDom.text "content" ) ]
-                |> expectNode
+        [ test "keyed node is a keyed node type" <| \_ ->
+            TestHelper.isKeyedNode (VirtualDom.keyedNode "ul" [] [])
+                |> Expect.equal True
+        , test "keyed node is not a regular element" <| \_ ->
+            TestHelper.isElementNode (VirtualDom.keyedNode "ul" [] [])
+                |> Expect.equal False
+        , test "keyed node has correct tag" <| \_ ->
+            TestHelper.getTag (VirtualDom.keyedNode "ul" [] [])
+                |> Expect.equal (Just "ul")
+        , test "keyed div has correct tag" <| \_ ->
+            TestHelper.getTag
+                (VirtualDom.keyedNode "div"
+                    [ VirtualDom.attribute "class" "list" ]
+                    [ ( "a", VirtualDom.text "alpha" ) ]
+                )
+                |> Expect.equal (Just "div")
+        , test "keyed node with styles has correct tag" <| \_ ->
+            TestHelper.getTag
+                (VirtualDom.keyedNode "div"
+                    [ VirtualDom.style "display" "flex" ]
+                    [ ( "child", VirtualDom.text "content" ) ]
+                )
+                |> Expect.equal (Just "div")
         ]
 
 
@@ -479,28 +445,127 @@ keyedNodeTests =
 keyedNodeNSTests : Test
 keyedNodeNSTests =
     describe "keyedNodeNS"
-        [ test "SVG keyed group" <| \_ ->
-            VirtualDom.keyedNodeNS "http://www.w3.org/2000/svg" "g" [] []
-                |> expectNode
-        , test "SVG keyed group with children" <| \_ ->
-            VirtualDom.keyedNodeNS "http://www.w3.org/2000/svg" "g" []
-                [ ( "circle-1"
-                  , VirtualDom.nodeNS "http://www.w3.org/2000/svg" "circle"
-                      [ VirtualDom.attribute "r" "10" ]
-                      []
-                  )
-                , ( "circle-2"
-                  , VirtualDom.nodeNS "http://www.w3.org/2000/svg" "circle"
-                      [ VirtualDom.attribute "r" "20" ]
-                      []
-                  )
-                ]
-                |> expectNode
-        , test "SVG keyed group with attributes" <| \_ ->
-            VirtualDom.keyedNodeNS "http://www.w3.org/2000/svg" "g"
-                [ VirtualDom.attribute "transform" "translate(10,10)" ]
-                [ ( "rect", VirtualDom.nodeNS "http://www.w3.org/2000/svg" "rect" [] [] ) ]
-                |> expectNode
+        [ test "SVG keyed group has correct tag" <| \_ ->
+            TestHelper.getTag
+                (VirtualDom.keyedNodeNS "http://www.w3.org/2000/svg" "g" [] [])
+                |> Expect.equal (Just "g")
+        , test "SVG keyed group is a keyed node type" <| \_ ->
+            TestHelper.isKeyedNode
+                (VirtualDom.keyedNodeNS "http://www.w3.org/2000/svg" "g" [] [])
+                |> Expect.equal True
+        , test "SVG keyed group has SVG namespace" <| \_ ->
+            TestHelper.getNamespace
+                (VirtualDom.keyedNodeNS "http://www.w3.org/2000/svg" "g" [] [])
+                |> Expect.equal (Just "http://www.w3.org/2000/svg")
+        ]
+
+
+
+-- MAP
+
+
+mapTests : Test
+mapTests =
+    describe "map"
+        [ test "map produces a tagger node" <| \_ ->
+            TestHelper.isMappedNode
+                (VirtualDom.map identity (VirtualDom.text "hello"))
+                |> Expect.equal True
+        , test "map of text is not a text node" <| \_ ->
+            TestHelper.isTextNode
+                (VirtualDom.map identity (VirtualDom.text "hello"))
+                |> Expect.equal False
+        , test "map of element is not an element node" <| \_ ->
+            TestHelper.isElementNode
+                (VirtualDom.map identity (VirtualDom.node "div" [] []))
+                |> Expect.equal False
+        ]
+
+
+
+-- MAP ATTRIBUTE
+
+
+mapAttributeTests : Test
+mapAttributeTests =
+    describe "mapAttribute"
+        [ test "mapAttribute preserves attribute key" <| \_ ->
+            TestHelper.getAttrKey
+                (VirtualDom.mapAttribute identity (VirtualDom.attribute "class" "foo"))
+                |> Expect.equal "class"
+        , test "mapAttribute preserves attribute value" <| \_ ->
+            TestHelper.getAttrValue
+                (VirtualDom.mapAttribute identity (VirtualDom.attribute "id" "bar"))
+                |> Expect.equal "bar"
+        , test "mapAttribute preserves style key" <| \_ ->
+            TestHelper.getAttrKey
+                (VirtualDom.mapAttribute identity (VirtualDom.style "color" "red"))
+                |> Expect.equal "color"
+        , test "mapAttribute preserves style value" <| \_ ->
+            TestHelper.getAttrValue
+                (VirtualDom.mapAttribute identity (VirtualDom.style "color" "red"))
+                |> Expect.equal "red"
+        ]
+
+
+
+-- XSS SANITIZATION
+
+
+xssSanitizationTests : Test
+xssSanitizationTests =
+    describe "XSS Sanitization"
+        [ describe "noJavaScriptUri"
+            [ test "allows normal http url" <| \_ ->
+                VirtualDom.noJavaScriptUri "http://example.com"
+                    |> Expect.equal "http://example.com"
+            , test "blocks javascript: uri" <| \_ ->
+                VirtualDom.noJavaScriptUri "javascript:alert(1)"
+                    |> Expect.notEqual "javascript:alert(1)"
+            , test "allows https url" <| \_ ->
+                VirtualDom.noJavaScriptUri "https://example.com"
+                    |> Expect.equal "https://example.com"
+            , test "allows relative url" <| \_ ->
+                VirtualDom.noJavaScriptUri "/path/to/page"
+                    |> Expect.equal "/path/to/page"
+            , test "blocks JAVASCRIPT: (case insensitive)" <| \_ ->
+                VirtualDom.noJavaScriptUri "JAVASCRIPT:alert(1)"
+                    |> Expect.notEqual "JAVASCRIPT:alert(1)"
+            , test "allows empty string" <| \_ ->
+                VirtualDom.noJavaScriptUri ""
+                    |> Expect.equal ""
+            , test "allows hash fragment" <| \_ ->
+                VirtualDom.noJavaScriptUri "#section"
+                    |> Expect.equal "#section"
+            ]
+        , describe "noJavaScriptOrHtmlUri"
+            [ test "allows normal url" <| \_ ->
+                VirtualDom.noJavaScriptOrHtmlUri "https://example.com"
+                    |> Expect.equal "https://example.com"
+            , test "blocks javascript: uri" <| \_ ->
+                VirtualDom.noJavaScriptOrHtmlUri "javascript:void(0)"
+                    |> Expect.notEqual "javascript:void(0)"
+            , test "blocks data:text/html" <| \_ ->
+                VirtualDom.noJavaScriptOrHtmlUri "data:text/html,<script>alert(1)</script>"
+                    |> Expect.notEqual "data:text/html,<script>alert(1)</script>"
+            , test "allows data:image/png" <| \_ ->
+                String.startsWith "data:image/png" (VirtualDom.noJavaScriptOrHtmlUri "data:image/png;base64,abc")
+                    |> Expect.equal True
+            ]
+        , describe "noScript"
+            [ test "allows normal tag" <| \_ ->
+                VirtualDom.noScript "div"
+                    |> Expect.equal "div"
+            , test "blocks script tag" <| \_ ->
+                VirtualDom.noScript "script"
+                    |> Expect.notEqual "script"
+            , test "blocks SCRIPT tag (case insensitive)" <| \_ ->
+                VirtualDom.noScript "SCRIPT"
+                    |> Expect.notEqual "SCRIPT"
+            , test "allows span tag" <| \_ ->
+                VirtualDom.noScript "span"
+                    |> Expect.equal "span"
+            ]
         ]
 
 
@@ -511,90 +576,28 @@ keyedNodeNSTests =
 lazyTests : Test
 lazyTests =
     describe "lazy"
-        [ test "lazy with text" <| \_ ->
-            VirtualDom.lazy VirtualDom.text "hello"
-                |> expectNode
-        , test "lazy with node builder" <| \_ ->
-            VirtualDom.lazy (\s -> VirtualDom.node "div" [] [ VirtualDom.text s ]) "content"
-                |> expectNode
-        , test "lazy2 with two arguments" <| \_ ->
-            VirtualDom.lazy2
-                (\a b -> VirtualDom.node "div" [] [ VirtualDom.text (a ++ b) ])
-                "hello"
-                " world"
-                |> expectNode
-        , test "lazy3 with three arguments" <| \_ ->
-            VirtualDom.lazy3
-                (\a b c -> VirtualDom.node "div" [] [ VirtualDom.text (a ++ b ++ c) ])
-                "a"
-                "b"
-                "c"
-                |> expectNode
-        , test "lazy4 with four arguments" <| \_ ->
-            VirtualDom.lazy4
-                (\a b c d -> VirtualDom.node "div" [] [ VirtualDom.text (a ++ b ++ c ++ d) ])
-                "a"
-                "b"
-                "c"
-                "d"
-                |> expectNode
-        , test "lazy5 with five arguments" <| \_ ->
-            VirtualDom.lazy5
-                (\a b c d e -> VirtualDom.node "div" [] [ VirtualDom.text (a ++ b ++ c ++ d ++ e) ])
-                "a"
-                "b"
-                "c"
-                "d"
-                "e"
-                |> expectNode
-        , test "lazy6 with six arguments" <| \_ ->
-            VirtualDom.lazy6
-                (\a b c d e f -> VirtualDom.node "div" [] [ VirtualDom.text (a ++ b ++ c ++ d ++ e ++ f) ])
-                "a"
-                "b"
-                "c"
-                "d"
-                "e"
-                "f"
-                |> expectNode
-        , test "lazy7 with seven arguments" <| \_ ->
-            VirtualDom.lazy7
-                (\a b c d e f g -> VirtualDom.node "div" [] [ VirtualDom.text (a ++ b ++ c ++ d ++ e ++ f ++ g) ])
-                "a"
-                "b"
-                "c"
-                "d"
-                "e"
-                "f"
-                "g"
-                |> expectNode
-        , test "lazy8 with eight arguments" <| \_ ->
-            VirtualDom.lazy8
-                (\a b c d e f g h -> VirtualDom.node "div" [] [ VirtualDom.text (a ++ b ++ c ++ d ++ e ++ f ++ g ++ h) ])
-                "a"
-                "b"
-                "c"
-                "d"
-                "e"
-                "f"
-                "g"
-                "h"
-                |> expectNode
-        , test "lazy with identity function" <| \_ ->
-            VirtualDom.lazy identity (VirtualDom.text "pass-through")
-                |> expectNode
+        [ test "lazy produces a node with correct tag when forced" <| \_ ->
+            TestHelper.getTag (VirtualDom.lazy (\_ -> VirtualDom.node "div" [] []) ())
+                |> Expect.equal (Just "div")
+        , test "lazy2 produces a node with correct tag when forced" <| \_ ->
+            TestHelper.getTag (VirtualDom.lazy2 (\_ _ -> VirtualDom.node "span" [] []) () ())
+                |> Expect.equal (Just "span")
+        , test "lazy3 produces a node with correct tag when forced" <| \_ ->
+            TestHelper.getTag (VirtualDom.lazy3 (\_ _ _ -> VirtualDom.node "p" [] []) () () ())
+                |> Expect.equal (Just "p")
+        , test "lazy4 produces a node when forced" <| \_ ->
+            TestHelper.isElementNode (VirtualDom.lazy4 (\_ _ _ _ -> VirtualDom.node "div" [] []) () () () ())
+                |> Expect.equal True
+        , test "lazy5 produces a node when forced" <| \_ ->
+            TestHelper.isElementNode (VirtualDom.lazy5 (\_ _ _ _ _ -> VirtualDom.node "div" [] []) () () () () ())
+                |> Expect.equal True
+        , test "lazy6 produces a node when forced" <| \_ ->
+            TestHelper.isElementNode (VirtualDom.lazy6 (\_ _ _ _ _ _ -> VirtualDom.node "div" [] []) () () () () () ())
+                |> Expect.equal True
+        , test "lazy7 produces a node when forced" <| \_ ->
+            TestHelper.isElementNode (VirtualDom.lazy7 (\_ _ _ _ _ _ _ -> VirtualDom.node "div" [] []) () () () () () () ())
+                |> Expect.equal True
+        , test "lazy8 produces a node when forced" <| \_ ->
+            TestHelper.isElementNode (VirtualDom.lazy8 (\_ _ _ _ _ _ _ _ -> VirtualDom.node "div" [] []) () () () () () () () ())
+                |> Expect.equal True
         ]
-
-
-
--- HELPERS
-
-
-expectNode : VirtualDom.Node msg -> Expect.Expectation
-expectNode _ =
-    Expect.pass
-
-
-expectAttribute : VirtualDom.Attribute msg -> Expect.Expectation
-expectAttribute _ =
-    Expect.pass
