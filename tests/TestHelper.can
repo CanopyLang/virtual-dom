@@ -1,0 +1,111 @@
+module TestHelper exposing
+    ( getTag
+    , getText
+    , isTextNode
+    , isElementNode
+    , isKeyedNode
+    , isMappedNode
+    , getNamespace
+    , getAttrKey
+    , getAttrValue
+    , getAttrType
+    )
+
+{-| Test helpers for inspecting VirtualDom node internals.
+
+VirtualDom nodes are opaque to Canopy code and cannot be compared
+with structural equality because the fact organization step embeds
+function references. Additionally, a compiler arity mismatch in FFI
+wrapping causes VirtualDom.node and similar constructors to return
+partially-applied functions rather than resolved node objects. This
+module provides FFI-backed introspection that works around both
+issues.
+
+Reliably verifiable properties:
+  - Text content of text nodes
+  - Tag names of element nodes
+  - Node type (text, element, keyed)
+  - Namespace URIs
+  - Raw attribute record fields (key, value, type tag)
+
+Not verifiable due to the arity mismatch:
+  - Child nodes (arguments lost)
+  - Organized fact values on nodes (arguments lost)
+-}
+
+import Maybe exposing (Maybe)
+
+foreign import javascript "external/test-helper.js" as TestHelperFFI
+
+
+{-| Get the HTML tag name of an element node. Returns Nothing for text nodes.
+Resolves partially-applied node functions via the FFI workaround.
+-}
+getTag : a -> Maybe String
+getTag =
+    TestHelperFFI.getTag
+
+
+{-| Get the text content of a text node. Returns Nothing for element nodes. -}
+getText : a -> Maybe String
+getText =
+    TestHelperFFI.getText
+
+
+{-| Check if a node is a text node (type tag 0). -}
+isTextNode : a -> Bool
+isTextNode =
+    TestHelperFFI.isTextNode
+
+
+{-| Check if a node is a regular element node (type tag 1).
+Resolves partially-applied node functions via the FFI workaround.
+-}
+isElementNode : a -> Bool
+isElementNode =
+    TestHelperFFI.isElementNode
+
+
+{-| Check if a node is a keyed element node (type tag 2).
+Resolves partially-applied node functions via the FFI workaround.
+-}
+isKeyedNode : a -> Bool
+isKeyedNode =
+    TestHelperFFI.isKeyedNode
+
+
+{-| Check if a node is a mapped/tagger node (wraps VirtualDom.map). -}
+isMappedNode : a -> Bool
+isMappedNode =
+    TestHelperFFI.isMappedNode
+
+
+{-| Get the namespace URI of a namespaced element node.
+Returns Nothing for non-namespaced nodes or text nodes.
+Resolves partially-applied node functions via the FFI workaround.
+-}
+getNamespace : a -> Maybe String
+getNamespace =
+    TestHelperFFI.getNamespace
+
+
+{-| Get the key of a raw attribute record (before fact organization). -}
+getAttrKey : a -> String
+getAttrKey =
+    TestHelperFFI.getAttrKey
+
+
+{-| Get the string value of a raw attribute record (before fact organization).
+Returns empty string for non-string values.
+-}
+getAttrValue : a -> String
+getAttrValue =
+    TestHelperFFI.getAttrValue
+
+
+{-| Get the type tag of a raw attribute record (e.g. "a__1_ATTR", "a__1_STYLE").
+Returns empty string for non-attribute values.
+-}
+getAttrType : a -> String
+getAttrType =
+    TestHelperFFI.getAttrType
