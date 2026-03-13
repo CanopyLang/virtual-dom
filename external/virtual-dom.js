@@ -15,9 +15,17 @@
 // ============================================================================
 
 
-var _VirtualDom_divertHrefToApp;
+var _VirtualDom_divertHrefToApp_stack = [];
+function _VirtualDom_divertHrefToApp_push(fn) { _VirtualDom_divertHrefToApp_stack.push(fn); }
+function _VirtualDom_divertHrefToApp_pop() { _VirtualDom_divertHrefToApp_stack.pop(); }
+function _VirtualDom_divertHrefToApp_current() { return _VirtualDom_divertHrefToApp_stack[_VirtualDom_divertHrefToApp_stack.length - 1]; }
+
+var _VirtualDom_eventNodes = new WeakMap();
 
 var _VirtualDom_doc = typeof document !== 'undefined' ? document : {};
+
+var _VirtualDom_nextMarkerId = 0;
+var _VirtualDom_MARKER = 'data-canopy';
 
 var _VirtualDom_JSON_SUCCEED = 0;
 
@@ -809,13 +817,14 @@ function _VirtualDom_render(vNode, eventNode)
 
 		var subEventRoot = { __tagger: tagger, __parent: eventNode };
 		var domNode = _VirtualDom_render(subNode, subEventRoot);
-		domNode.canopy_event_node_ref = subEventRoot;
+		_VirtualDom_eventNodes.set(domNode, subEventRoot);
 		return domNode;
 	}
 
 	if (tag === __2_CUSTOM)
 	{
 		var domNode = vNode.__render(vNode.__model);
+		if (domNode.setAttribute) { domNode.setAttribute(_VirtualDom_MARKER, _VirtualDom_nextMarkerId++); }
 		_VirtualDom_applyFacts(domNode, eventNode, vNode.__facts);
 		return domNode;
 	}
@@ -826,9 +835,13 @@ function _VirtualDom_render(vNode, eventNode)
 		? _VirtualDom_doc.createElementNS(vNode.__namespace, vNode.__tag)
 		: _VirtualDom_doc.createElement(vNode.__tag);
 
-	if (_VirtualDom_divertHrefToApp && vNode.__tag == 'a')
+	// Stamp marker for tNode-based DOM pairing
+	domNode.setAttribute(_VirtualDom_MARKER, _VirtualDom_nextMarkerId++);
+
+	var _divertHref = _VirtualDom_divertHrefToApp_current();
+	if (_divertHref && vNode.__tag == 'a')
 	{
-		domNode.addEventListener('click', _VirtualDom_divertHrefToApp(domNode));
+		domNode.addEventListener('click', _divertHref(domNode));
 	}
 
 	_VirtualDom_applyFacts(domNode, eventNode, vNode.__facts);
@@ -889,7 +902,17 @@ function _VirtualDom_applyStyles(domNode, styles)
 
 	for (var key in styles)
 	{
-		domNodeStyle[key] = styles[key];
+		var value = styles[key];
+		if (key.indexOf('--') === 0)
+		{
+			value
+				? domNodeStyle.setProperty(key, value)
+				: domNodeStyle.removeProperty(key);
+		}
+		else
+		{
+			domNodeStyle[key] = value;
+		}
 	}
 }
 
@@ -991,6 +1014,150 @@ try
 	}));
 }
 catch(e) {}
+
+
+
+// ============================================================================
+// SCOPED CSS (Styled Components)
+//
+// CSS facts are hashed into class names and injected as <style> rules.
+// This enables pseudo-classes, media queries, and other CSS features that
+// inline styles cannot express.
+// ============================================================================
+
+
+var _VirtualDom_cssRuleCache = {};  // cssText → className (deduplicates by full text, not hash)
+var _VirtualDom_cssSheet = null;    // lazily created CSSStyleSheet
+
+function _VirtualDom_getCssSheet()
+{
+	if (_VirtualDom_cssSheet) { return _VirtualDom_cssSheet; }
+
+	var styleEl = _VirtualDom_doc.getElementById
+		? _VirtualDom_doc.getElementById('canopy-styled')
+		: null;
+
+	if (!styleEl && _VirtualDom_doc.createElement)
+	{
+		styleEl = _VirtualDom_doc.createElement('style');
+		styleEl.id = 'canopy-styled';
+		var parent = _VirtualDom_doc.head || _VirtualDom_doc.documentElement;
+		if (parent) { parent.appendChild(styleEl); }
+	}
+
+	// Only cache when we actually get a sheet — avoids permanently caching
+	// null in SSR environments where the sheet becomes available later
+	if (styleEl && styleEl.sheet)
+	{
+		_VirtualDom_cssSheet = styleEl.sheet;
+	}
+
+	return _VirtualDom_cssSheet;
+}
+
+
+/**
+ * FNV-1a hash (32-bit) to generate stable, short class names from CSS text.
+ * Uses codePointAt for correct Unicode handling (surrogate pairs, emoji).
+ */
+function _VirtualDom_hashCss(cssText)
+{
+	var hash = 0x811c9dc5;
+	for (var i = 0; i < cssText.length;)
+	{
+		var cp = cssText.codePointAt(i);
+		hash ^= cp;
+		hash = (hash * 0x01000193) >>> 0;
+		i += cp > 0xFFFF ? 2 : 1;
+	}
+	return '_c_' + hash.toString(36);
+}
+
+
+/**
+ * Create a scoped CSS fact with pseudo-class/media query support.
+ * Takes a Canopy linked list of { selector : String, declarations : String }
+ * records. The declarations are hashed into a deterministic class name,
+ * CSS rules are injected into a shared stylesheet, and the class is applied
+ * to the element.
+ *
+ * Selectors starting with `@` (media/container queries) are wrapped around
+ * the class selector. Other selectors are appended to `.className` directly
+ * (e.g. `:hover` → `.className:hover`, ` .child` → `.className .child`).
+ *
+ * @canopy-type List { selector : String, declarations : String } -> Attribute msg
+ * @name cssScoped
+ */
+function _VirtualDom_cssScoped(ruleList)
+{
+	// Collect rules from Canopy linked list into a JS array, and build
+	// the hash input string in one pass
+	var rules = [];
+	var allText = '';
+	for (var list = ruleList; list.b; list = list.b)
+	{
+		var rule = list.a;
+		rules.push(rule);
+		allText += rule.selector + '{' + rule.declarations + '}';
+	}
+
+	// Cache by full CSS text to prevent hash collisions from silently
+	// dropping different CSS that hashes to the same class name
+	var cached = _VirtualDom_cssRuleCache[allText];
+	if (cached)
+	{
+		return { $: 'a__1_ATTR', __key: 'class', __value: cached };
+	}
+
+	var className = _VirtualDom_hashCss(allText);
+
+	// Handle the (extremely rare) case where two different CSS texts produce
+	// the same hash — append a disambiguating suffix
+	var candidateName = className;
+	var suffix = 0;
+	while (_VirtualDom_cssRuleCache['__name__' + candidateName])
+	{
+		suffix++;
+		candidateName = className + '_' + suffix;
+	}
+	className = candidateName;
+
+	var sheet = _VirtualDom_getCssSheet();
+	if (sheet)
+	{
+		for (var i = 0; i < rules.length; i++)
+		{
+			var selectorText = rules[i].selector;
+			var cssRule;
+
+			if (selectorText.charAt(0) === '@')
+			{
+				// @media / @container queries: wrap the class selector
+				// e.g. "@media (max-width: 768px)" → "@media (...) { .cls { decls } }"
+				cssRule = selectorText + ' { .' + className + ' { ' + rules[i].declarations + ' } }';
+			}
+			else
+			{
+				// Pseudo-class/element: append to class (e.g. ":hover" → ".cls:hover")
+				// Nested selector: already has leading space (e.g. " .child" → ".cls .child")
+				// Base: empty selector → just ".cls"
+				cssRule = '.' + className + selectorText + ' { ' + rules[i].declarations + ' }';
+			}
+
+			try { sheet.insertRule(cssRule, sheet.cssRules.length); }
+			catch (e) { /* invalid CSS — skip silently */ }
+		}
+	}
+
+	_VirtualDom_cssRuleCache[allText] = className;
+	_VirtualDom_cssRuleCache['__name__' + className] = true;
+
+	return {
+		$: 'a__1_ATTR',
+		__key: 'class',
+		__value: className
+	};
+}
 
 
 
@@ -1301,7 +1468,8 @@ function _VirtualDom_diffFacts(x, y, category)
 
 		// reference equal, so don't worry about it
 		if (xValue === yValue && xKey !== 'value' && xKey !== 'checked'
-			|| category === 'a__1_EVENT' && _VirtualDom_equalEvents(xValue, yValue))
+			|| category === 'a__1_EVENT' && _VirtualDom_equalEvents(xValue, yValue)
+			|| category === 'a__1_ATTR_NS' && xValue.__namespace === yValue.__namespace && xValue.__value === yValue.__value)
 		{
 			continue;
 		}
@@ -1717,7 +1885,7 @@ function _VirtualDom_addDomNodesHelp(domNode, vNode, patches, i, low, high, even
 			subNode = subNode.__node;
 		}
 
-		return _VirtualDom_addDomNodesHelp(domNode, subNode, patches, i, low + 1, high, domNode.canopy_event_node_ref);
+		return _VirtualDom_addDomNodesHelp(domNode, subNode, patches, i, low + 1, high, _VirtualDom_eventNodes.get(domNode));
 	}
 
 	// tag must be __2_NODE or __2_KEYED_NODE at this point
@@ -1797,13 +1965,14 @@ function _VirtualDom_applyPatch(domNode, patch)
 			return _VirtualDom_applyPatchesHelp(domNode, patch.__data);
 
 		case __3_TAGGER:
-			if (domNode.canopy_event_node_ref)
+			var existingEventNode = _VirtualDom_eventNodes.get(domNode);
+			if (existingEventNode)
 			{
-				domNode.canopy_event_node_ref.__tagger = patch.__data;
+				existingEventNode.__tagger = patch.__data;
 			}
 			else
 			{
-				domNode.canopy_event_node_ref = { __tagger: patch.__data, __parent: patch.__eventNode };
+				_VirtualDom_eventNodes.set(domNode, { __tagger: patch.__data, __parent: patch.__eventNode });
 			}
 			return domNode;
 
@@ -1858,9 +2027,10 @@ function _VirtualDom_applyPatchRedraw(domNode, vNode, eventNode)
 	var parentNode = domNode.parentNode;
 	var newNode = _VirtualDom_render(vNode, eventNode);
 
-	if (!newNode.canopy_event_node_ref)
+	if (!_VirtualDom_eventNodes.has(newNode))
 	{
-		newNode.canopy_event_node_ref = domNode.canopy_event_node_ref;
+		var oldEventNode = _VirtualDom_eventNodes.get(domNode);
+		if (oldEventNode) { _VirtualDom_eventNodes.set(newNode, oldEventNode); }
 	}
 
 	if (parentNode && newNode !== domNode)
@@ -2003,4 +2173,460 @@ function _VirtualDom_dekey(keyedNode)
 		__namespace: keyedNode.__namespace,
 		__descendantsCount: keyedNode.__descendantsCount
 	};
+}
+
+
+
+// ============================================================================
+// COMBINED DIFF + PATCH (tNode Architecture)
+//
+// Instead of producing a patch list and then applying it in a second pass,
+// walk old vdom + new vdom + DOM simultaneously, applying changes inline.
+// Uses data-canopy markers to identify own DOM nodes, skipping any nodes
+// injected by browser extensions (Grammarly, LastPass, 1Password, etc.).
+// ============================================================================
+
+
+/**
+ * Get the "own" children of a DOM node — those with data-canopy markers or
+ * text nodes — skipping any element nodes injected by browser extensions.
+ * Also handles Google Translate which wraps text in <font> tags.
+ */
+function _VirtualDom_ownChildren(domNode)
+{
+	var result = [];
+	var childNodes = domNode.childNodes;
+	for (var i = 0; i < childNodes.length; i++)
+	{
+		var child = childNodes[i];
+		if (child.nodeType === 3)
+		{
+			// Text node — always ours
+			result.push(child);
+		}
+		else if (child.nodeType === 1 && child.hasAttribute(_VirtualDom_MARKER))
+		{
+			// Element node with our marker — ours
+			result.push(child);
+		}
+		// Otherwise skip (extension-injected)
+	}
+	return result;
+}
+
+
+/**
+ * Replace a DOM node with a freshly rendered vdom node, preserving the
+ * parent relationship. Returns the new DOM node.
+ */
+function _VirtualDom_redraw(domNode, vNode, eventNode)
+{
+	var parentNode = domNode.parentNode;
+	var newNode = _VirtualDom_render(vNode, eventNode);
+
+	if (!_VirtualDom_eventNodes.has(newNode))
+	{
+		var oldEventNode = _VirtualDom_eventNodes.get(domNode);
+		if (oldEventNode) { _VirtualDom_eventNodes.set(newNode, oldEventNode); }
+	}
+
+	if (parentNode && newNode !== domNode)
+	{
+		parentNode.replaceChild(newNode, domNode);
+	}
+	return newNode;
+}
+
+
+/**
+ * Combined diff+patch: walk old vdom, new vdom, and the live DOM tree
+ * simultaneously, applying changes inline. Returns the (possibly replaced)
+ * DOM node for this position.
+ *
+ * This eliminates the separate addDomNodes traversal and makes the
+ * implementation resilient to browser-extension-injected DOM nodes.
+ */
+function _VirtualDom_update(domNode, x, y, eventNode)
+{
+	// Same reference — nothing to do
+	if (x === y)
+	{
+		return domNode;
+	}
+
+	var xType = x.$;
+	var yType = y.$;
+
+	// Type mismatch — redraw, unless NODE↔KEYED_NODE which we can dekey
+	if (xType !== yType)
+	{
+		if (xType === __2_NODE && yType === __2_KEYED_NODE)
+		{
+			y = _VirtualDom_dekey(y);
+			yType = __2_NODE;
+		}
+		else
+		{
+			return _VirtualDom_redraw(domNode, y, eventNode);
+		}
+	}
+
+	switch (yType)
+	{
+		case __2_TEXT:
+			if (x.__text !== y.__text)
+			{
+				// Detect translated text (browser/extension translation):
+				// if DOM text doesn't match old vdom, a translator changed it.
+				// We preserve the translation by not updating.
+				if (domNode.nodeType === 3 && domNode.data === x.__text)
+				{
+					domNode.replaceData(0, domNode.length, y.__text);
+				}
+			}
+			return domNode;
+
+		case __2_THUNK:
+			var xRefs = x.__refs;
+			var yRefs = y.__refs;
+			var i = xRefs.length;
+			var same = i === yRefs.length;
+			while (same && i--)
+			{
+				same = xRefs[i] === yRefs[i];
+			}
+			if (same)
+			{
+				y.__node = x.__node;
+				return domNode;
+			}
+			y.__node = y.__thunk();
+			return _VirtualDom_update(domNode, x.__node || (x.__node = x.__thunk()), y.__node, eventNode);
+
+		case __2_TAGGER:
+			var xTaggers = x.__tagger;
+			var yTaggers = y.__tagger;
+			var nesting = false;
+
+			var xSubNode = x.__node;
+			while (xSubNode.$ === __2_TAGGER)
+			{
+				nesting = true;
+				typeof xTaggers !== 'object'
+					? xTaggers = [xTaggers, xSubNode.__tagger]
+					: xTaggers.push(xSubNode.__tagger);
+				xSubNode = xSubNode.__node;
+			}
+
+			var ySubNode = y.__node;
+			while (ySubNode.$ === __2_TAGGER)
+			{
+				nesting = true;
+				typeof yTaggers !== 'object'
+					? yTaggers = [yTaggers, ySubNode.__tagger]
+					: yTaggers.push(ySubNode.__tagger);
+				ySubNode = ySubNode.__node;
+			}
+
+			if (nesting && xTaggers.length !== yTaggers.length)
+			{
+				return _VirtualDom_redraw(domNode, y, eventNode);
+			}
+
+			// Update tagger chain
+			if (nesting ? !_VirtualDom_pairwiseRefEqual(xTaggers, yTaggers) : xTaggers !== yTaggers)
+			{
+				var existingEventNode = _VirtualDom_eventNodes.get(domNode);
+				if (existingEventNode)
+				{
+					existingEventNode.__tagger = yTaggers;
+				}
+				else
+				{
+					_VirtualDom_eventNodes.set(domNode, { __tagger: yTaggers, __parent: eventNode });
+				}
+			}
+
+			var subEventNode = _VirtualDom_eventNodes.get(domNode) || eventNode;
+			return _VirtualDom_update(domNode, xSubNode, ySubNode, subEventNode);
+
+		case __2_NODE:
+			if (x.__tag !== y.__tag || x.__namespace !== y.__namespace)
+			{
+				return _VirtualDom_redraw(domNode, y, eventNode);
+			}
+
+			var factsDiff = _VirtualDom_diffFacts(x.__facts, y.__facts);
+			if (factsDiff) { _VirtualDom_applyFacts(domNode, eventNode, factsDiff); }
+
+			_VirtualDom_updateKids(domNode, x.__kids, y.__kids, eventNode);
+			return domNode;
+
+		case __2_KEYED_NODE:
+			if (x.__tag !== y.__tag || x.__namespace !== y.__namespace)
+			{
+				return _VirtualDom_redraw(domNode, y, eventNode);
+			}
+
+			var factsDiff = _VirtualDom_diffFacts(x.__facts, y.__facts);
+			if (factsDiff) { _VirtualDom_applyFacts(domNode, eventNode, factsDiff); }
+
+			_VirtualDom_updateKeyedKids(domNode, x.__kids, y.__kids, eventNode);
+			return domNode;
+
+		case __2_CUSTOM:
+			if (x.__render !== y.__render)
+			{
+				return _VirtualDom_redraw(domNode, y, eventNode);
+			}
+
+			var factsDiff = _VirtualDom_diffFacts(x.__facts, y.__facts);
+			if (factsDiff) { _VirtualDom_applyFacts(domNode, eventNode, factsDiff); }
+
+			var patch = y.__diff(x.__model, y.__model);
+			if (patch) { patch(domNode); }
+			return domNode;
+	}
+
+	return domNode;
+}
+
+
+/**
+ * Update non-keyed children inline. Matches DOM children to vdom children
+ * using markers to skip extension-injected nodes.
+ */
+function _VirtualDom_updateKids(domNode, xKids, yKids, eventNode)
+{
+	var xLen = xKids.length;
+	var yLen = yKids.length;
+	var minLen = xLen < yLen ? xLen : yLen;
+
+	// Get our own DOM children (skip extension-injected)
+	var domKids = _VirtualDom_ownChildren(domNode);
+
+	// Update existing children pairwise
+	for (var i = 0; i < minLen; i++)
+	{
+		var newDom = _VirtualDom_update(domKids[i], xKids[i], yKids[i], eventNode);
+		if (newDom !== domKids[i])
+		{
+			domKids[i] = newDom;
+		}
+	}
+
+	// Remove excess old children
+	for (var i = xLen - 1; i >= yLen; i--)
+	{
+		domNode.removeChild(domKids[i]);
+	}
+
+	// Append new children
+	for (var i = xLen; i < yLen; i++)
+	{
+		_VirtualDom_appendChild(domNode, _VirtualDom_render(yKids[i], eventNode));
+	}
+}
+
+
+/**
+ * Update keyed children inline. Uses a map from key→{vnode, dom} to match
+ * children efficiently, handling insertions, removals, and reorders.
+ * Prefers Element.prototype.moveBefore (Chrome 133+) for reordering when
+ * available, falling back to insertBefore.
+ */
+function _VirtualDom_updateKeyedKids(domNode, xKids, yKids, eventNode)
+{
+	var domKids = _VirtualDom_ownChildren(domNode);
+
+	// Build map: key → { vnode, dom, used }
+	var oldMap = {};
+	for (var i = 0; i < xKids.length; i++)
+	{
+		oldMap[xKids[i].a] = { vnode: xKids[i].b, dom: domKids[i], used: false };
+	}
+
+	// Build new DOM order
+	var newDomOrder = [];
+	for (var i = 0; i < yKids.length; i++)
+	{
+		var key = yKids[i].a;
+		var yKid = yKids[i].b;
+		var old = oldMap[key];
+
+		if (old)
+		{
+			// Update existing node
+			var newDom = _VirtualDom_update(old.dom, old.vnode, yKid, eventNode);
+			old.used = true;
+			newDomOrder.push(newDom);
+		}
+		else
+		{
+			// Create new node
+			newDomOrder.push(_VirtualDom_render(yKid, eventNode));
+		}
+	}
+
+	// Remove unused old nodes
+	for (var key in oldMap)
+	{
+		if (Object.prototype.hasOwnProperty.call(oldMap, key) && !oldMap[key].used)
+		{
+			domNode.removeChild(oldMap[key].dom);
+		}
+	}
+
+	// Reorder DOM children to match newDomOrder.
+	// Use moveBefore (Chrome 133+) when available for better animation
+	// preservation, fall back to insertBefore.
+	var _moveBefore = domNode.moveBefore ? domNode.moveBefore.bind(domNode) : null;
+
+	// Walk through the desired order, inserting/moving as needed
+	var domChildNodes = domNode.childNodes;
+	var cursor = 0;
+	for (var i = 0; i < newDomOrder.length; i++)
+	{
+		var desired = newDomOrder[i];
+
+		// Skip extension-injected nodes in the cursor scan
+		while (cursor < domChildNodes.length
+			&& domChildNodes[cursor].nodeType === 1
+			&& !domChildNodes[cursor].hasAttribute(_VirtualDom_MARKER)
+			&& domChildNodes[cursor] !== desired)
+		{
+			cursor++;
+		}
+
+		if (cursor < domChildNodes.length && domChildNodes[cursor] === desired)
+		{
+			// Already in the right position
+			cursor++;
+		}
+		else if (desired.parentNode === domNode)
+		{
+			// Needs to move — use moveBefore if available
+			if (_moveBefore)
+			{
+				_moveBefore(desired, domChildNodes[cursor] || null);
+			}
+			else
+			{
+				domNode.insertBefore(desired, domChildNodes[cursor] || null);
+			}
+			cursor++;
+		}
+		else
+		{
+			// New node — insert at cursor position
+			domNode.insertBefore(desired, domChildNodes[cursor] || null);
+			cursor++;
+		}
+	}
+}
+
+
+/**
+ * Virtualize form control values. During _VirtualDom_diffFacts, compare
+ * virtualized values from vdom instead of reading from DOM. This prevents
+ * cursor jump bugs and input race conditions.
+ */
+function _VirtualDom_virtualizeFormValue(domNode, key, vdomValue)
+{
+	// For value, checked, and selected: write to DOM only when the vdom
+	// value actually changed (as tracked in the facts diff). The existing
+	// _VirtualDom_applyFacts already handles the domNode[key] !== value
+	// guard, so form virtualization is handled by the existing code path.
+	// The key insight is that with combined diff+patch, we always compare
+	// old vdom → new vdom (never reading from DOM), so the value is
+	// authoritative from the application state.
+	domNode[key] = vdomValue;
+}
+
+
+
+// ============================================================================
+// SSR HYDRATION
+//
+// Walk existing server-rendered DOM, attach data-canopy markers, and wire
+// up event handlers without re-rendering. This enables server-side rendering
+// without a full client re-render.
+// ============================================================================
+
+
+/**
+ * Hydrate a server-rendered DOM tree by walking vdom and existing DOM in
+ * parallel. Attaches markers, event handlers, and builds the mapping needed
+ * for subsequent updates.
+ *
+ * @canopy-type DomNode -> Node msg -> (msg -> ()) -> DomNode
+ * @name hydrate
+ */
+function _VirtualDom_hydrate(domNode, vNode, eventNode)
+{
+	var tag = vNode.$;
+
+	if (tag === __2_THUNK)
+	{
+		return _VirtualDom_hydrate(domNode, vNode.__node || (vNode.__node = vNode.__thunk()), eventNode);
+	}
+
+	if (tag === __2_TEXT)
+	{
+		// Text node — nothing to hydrate (no events on text)
+		return domNode;
+	}
+
+	if (tag === __2_TAGGER)
+	{
+		var subNode = vNode.__node;
+		var tagger = vNode.__tagger;
+
+		while (subNode.$ === __2_TAGGER)
+		{
+			typeof tagger !== 'object'
+				? tagger = [tagger, subNode.__tagger]
+				: tagger.push(subNode.__tagger);
+			subNode = subNode.__node;
+		}
+
+		var subEventRoot = { __tagger: tagger, __parent: eventNode };
+		_VirtualDom_eventNodes.set(domNode, subEventRoot);
+		return _VirtualDom_hydrate(domNode, subNode, subEventRoot);
+	}
+
+	if (tag === __2_CUSTOM)
+	{
+		if (domNode.setAttribute) { domNode.setAttribute(_VirtualDom_MARKER, _VirtualDom_nextMarkerId++); }
+		_VirtualDom_applyFacts(domNode, eventNode, vNode.__facts);
+		return domNode;
+	}
+
+	// NODE or KEYED_NODE
+	domNode.setAttribute(_VirtualDom_MARKER, _VirtualDom_nextMarkerId++);
+
+	var _divertHref = _VirtualDom_divertHrefToApp_current();
+	if (_divertHref && vNode.__tag == 'a')
+	{
+		domNode.addEventListener('click', _divertHref(domNode));
+	}
+
+	// Apply only events (styles/attrs are already in the server-rendered HTML)
+	var facts = vNode.__facts;
+	if (facts['a__1_EVENT'])
+	{
+		_VirtualDom_applyEvents(domNode, eventNode, facts['a__1_EVENT']);
+	}
+
+	// Recurse into children
+	var kids = vNode.__kids;
+	var domKids = _VirtualDom_ownChildren(domNode);
+	var isKeyed = tag === __2_KEYED_NODE;
+
+	for (var i = 0; i < kids.length && i < domKids.length; i++)
+	{
+		_VirtualDom_hydrate(domKids[i], isKeyed ? kids[i].b : kids[i], eventNode);
+	}
+
+	return domNode;
 }

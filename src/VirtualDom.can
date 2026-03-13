@@ -9,6 +9,7 @@ module VirtualDom exposing
   , keyedNode, keyedNodeNS
   , lazy, lazy2, lazy3, lazy4, lazy5, lazy6, lazy7, lazy8
   , toHandlerInt
+  , cssAttribute
   )
 
 {-| API to the core diffing algorithm. Can serve as a foundation for libraries
@@ -31,6 +32,9 @@ that expose more helper functions for HTML or SVG.
 
 # Lazy Nodes
 @docs lazy, lazy2, lazy3, lazy4, lazy5, lazy6, lazy7, lazy8
+
+# Scoped CSS
+@docs cssAttribute
 
 -}
 
@@ -396,6 +400,29 @@ noJavaScriptOrHtmlJson =
 noScript : String -> String
 noScript =
   VirtualDomFFI.noScript
+
+
+-- SCOPED CSS
+
+
+{-| Apply scoped CSS to an element. Takes a pre-compiled CSS string containing
+selector-suffixed rule blocks. The virtual-dom runtime hashes the CSS into a
+deterministic class name, injects the rules into a shared `<style>` sheet
+(deduplicating by hash), and applies the class to the element.
+
+Unlike the `style` attribute, this supports pseudo-classes (`:hover`, `:focus`),
+pseudo-elements (`::before`, `::after`), media queries, container queries, and
+CSS nesting — anything expressible in a CSS rule block.
+
+This is the foundation for `Css.css` in `canopy/css`, which compiles typed
+`Css.Style` values into the CSS string this function expects.
+-}
+cssAttribute : List { selector : String, declarations : String } -> Attribute msg
+cssAttribute =
+  VirtualDomFFI.cssScoped
+
+
+-- HYDRATION
 
 
 -- FOR INTERNAL USE ONLY
