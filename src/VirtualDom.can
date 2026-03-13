@@ -68,7 +68,7 @@ node tag =
 defined like this:
 
     path : List (Attribute msg) -> List (Node msg) -> Node msg
-    path attrubutes children =
+    path attributes children =
       nodeNS "http://www.w3.org/2000/svg" "path" attributes children
 -}
 nodeNS : String -> String -> List (Attribute msg) -> List (Node msg) -> Node msg
@@ -86,8 +86,8 @@ text =
   VirtualDomFFI.text
 
 
-{-| This function is useful when nesting components with [the Elm
-Architecture](https://github.com/evancz/elm-architecture-tutorial/). It lets
+{-| This function is useful when nesting components with [the Canopy
+Architecture](https://canopy-lang.org/guide/). It lets
 you transform the messages produced by a subtree.
 
 Say you have a node named `button` that produces `()` values when it is
@@ -191,7 +191,7 @@ attribute key value =
 {-| Would you believe that there is another way to do this?! This uses
 JavaScript's `setAttributeNS` function behind the scenes. It is doing pretty
 much the same thing as `attribute` but you are able to have namespaced
-attributes. As an example, the `elm/svg` package defines an attribute
+attributes. As an example, the `canopy/svg` package defines an attribute
 like this:
 
     xlinkHref : String -> Attribute msg
@@ -231,7 +231,7 @@ You can define `onClick` like this:
 about what that means [here][]. There is not support within Canopy for doing
 tricks with the capture phase. We recommend doing that in JS through ports.
 
-[here]: https://github.com/elm/virtual-dom/blob/master/hints/capture-vs-bubble.md
+[here]: https://canopy-lang.org/guide/capture-vs-bubble
 -}
 on : String -> Handler msg -> Attribute msg
 on =

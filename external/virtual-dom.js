@@ -118,27 +118,24 @@ function text(string)
  * @param {string} tag - Element tag name
  * @returns {Function} Curried function accepting facts and kids
  */
-var nodeNS = F2(function(namespace, tag)
+var nodeNS = F4(function(namespace, tag, factList, kidList)
 {
-	return F2(function(factList, kidList)
+	for (var kids = [], descendantsCount = 0; kidList.b; kidList = kidList.b) // WHILE_CONS
 	{
-		for (var kids = [], descendantsCount = 0; kidList.b; kidList = kidList.b) // WHILE_CONS
-		{
-			var kid = kidList.a;
-			descendantsCount += (kid.__descendantsCount || 0);
-			kids.push(kid);
-		}
-		descendantsCount += kids.length;
+		var kid = kidList.a;
+		descendantsCount += (kid.__descendantsCount || 0);
+		kids.push(kid);
+	}
+	descendantsCount += kids.length;
 
-		return {
-			$: __2_NODE,
-			__tag: tag,
-			__facts: _VirtualDom_organizeFacts(factList),
-			__kids: kids,
-			__namespace: namespace,
-			__descendantsCount: descendantsCount
-		};
-	});
+	return {
+		$: __2_NODE,
+		__tag: tag,
+		__facts: _VirtualDom_organizeFacts(factList),
+		__kids: kids,
+		__namespace: namespace,
+		__descendantsCount: descendantsCount
+	};
 });
 
 
@@ -150,7 +147,10 @@ var nodeNS = F2(function(namespace, tag)
  * @param {string} tag - Element tag name
  * @returns {Function} Curried function accepting facts and kids
  */
-var node = nodeNS(undefined);
+var node = F3(function(tag, factList, kidList)
+{
+	return A4(nodeNS, undefined, tag, factList, kidList);
+});
 
 
 
@@ -169,27 +169,24 @@ var node = nodeNS(undefined);
  * @param {string} tag - Element tag name
  * @returns {Function} Curried function accepting facts and keyed kids
  */
-var keyedNodeNS = F2(function(namespace, tag)
+var keyedNodeNS = F4(function(namespace, tag, factList, kidList)
 {
-	return F2(function(factList, kidList)
+	for (var kids = [], descendantsCount = 0; kidList.b; kidList = kidList.b) // WHILE_CONS
 	{
-		for (var kids = [], descendantsCount = 0; kidList.b; kidList = kidList.b) // WHILE_CONS
-		{
-			var kid = kidList.a;
-			descendantsCount += (kid.b.__descendantsCount || 0);
-			kids.push(kid);
-		}
-		descendantsCount += kids.length;
+		var kid = kidList.a;
+		descendantsCount += (kid.b.__descendantsCount || 0);
+		kids.push(kid);
+	}
+	descendantsCount += kids.length;
 
-		return {
-			$: __2_KEYED_NODE,
-			__tag: tag,
-			__facts: _VirtualDom_organizeFacts(factList),
-			__kids: kids,
-			__namespace: namespace,
-			__descendantsCount: descendantsCount
-		};
-	});
+	return {
+		$: __2_KEYED_NODE,
+		__tag: tag,
+		__facts: _VirtualDom_organizeFacts(factList),
+		__kids: kids,
+		__namespace: namespace,
+		__descendantsCount: descendantsCount
+	};
 });
 
 
@@ -201,7 +198,10 @@ var keyedNodeNS = F2(function(namespace, tag)
  * @param {string} tag - Element tag name
  * @returns {Function} Curried function accepting facts and keyed kids
  */
-var keyedNode = keyedNodeNS(undefined);
+var keyedNode = F3(function(tag, factList, kidList)
+{
+	return A4(keyedNodeNS, undefined, tag, factList, kidList);
+});
 
 
 
@@ -596,7 +596,7 @@ function noOnOrFormAction(key)
  */
 function noInnerHtmlOrFormAction(key)
 {
-	return key == 'innerHTML' || key == 'formAction' ? 'data-' + key : key;
+	return key == 'innerHTML' || key == 'formAction' || key == 'srcdoc' ? 'data-' + key : key;
 }
 
 /**
@@ -637,6 +637,19 @@ function noJavaScriptOrHtmlJson(value)
 {
 	return (typeof _Json_unwrap(value) === 'string' && _VirtualDom_RE_js_html.test(_Json_unwrap(value)))
 		? _Json_wrap('') : value;
+}
+
+
+/**
+ * Check if a property key is dangerous (could cause prototype pollution).
+ * Blocks __proto__, constructor, and prototype to prevent attackers from
+ * polluting Object.prototype via crafted virtual DOM properties.
+ * @param {string} key - Property key to check
+ * @returns {boolean} True if the key is dangerous
+ */
+function _VirtualDom_dangerousProperty(key)
+{
+	return key === '__proto__' || key === 'constructor' || key === 'prototype';
 }
 
 
@@ -703,9 +716,9 @@ var _VirtualDom_mapEventTuple = F2(function(func, tuple)
 var _VirtualDom_mapEventRecord = F2(function(func, record)
 {
 	return {
-		__$message: func(record.__$message),
-		__$stopPropagation: record.__$stopPropagation,
-		__$preventDefault: record.__$preventDefault
+		message: func(record.message),
+		stopPropagation: record.stopPropagation,
+		preventDefault: record.preventDefault
 	}
 });
 
@@ -731,6 +744,8 @@ function _VirtualDom_organizeFacts(factList)
 
 		if (tag === 'a__1_PROP')
 		{
+			if (_VirtualDom_dangerousProperty(key)) { continue; }
+
 			(key === 'className')
 				? _VirtualDom_addClass(facts, key, _Json_unwrap(value))
 				: facts[key] = _Json_unwrap(value);
@@ -794,7 +809,7 @@ function _VirtualDom_render(vNode, eventNode)
 
 		var subEventRoot = { __tagger: tagger, __parent: eventNode };
 		var domNode = _VirtualDom_render(subNode, subEventRoot);
-		domNode.elm_event_node_ref = subEventRoot;
+		domNode.canopy_event_node_ref = subEventRoot;
 		return domNode;
 	}
 
@@ -855,7 +870,9 @@ function _VirtualDom_applyFacts(domNode, eventNode, facts)
 		key === 'a__1_ATTR_NS'
 			? _VirtualDom_applyAttrsNS(domNode, value)
 			:
-		((key !== 'value' && key !== 'checked') || domNode[key] !== value) && (domNode[key] = value);
+		!_VirtualDom_dangerousProperty(key)
+			&& ((key !== 'value' && key !== 'checked') || domNode[key] !== value)
+			&& (domNode[key] = value);
 	}
 }
 
@@ -924,7 +941,7 @@ function _VirtualDom_applyAttrsNS(domNode, nsAttrs)
 
 function _VirtualDom_applyEvents(domNode, eventNode, events)
 {
-	var allCallbacks = domNode.elmFs || (domNode.elmFs = {});
+	var allCallbacks = domNode.canopyFs || (domNode.canopyFs = {});
 
 	for (var key in events)
 	{
@@ -1006,11 +1023,11 @@ function _VirtualDom_makeCallback(eventNode, initialHandler)
 		// 3 = Custom
 
 		var value = result.a;
-		var message = !tag ? value : tag < 3 ? value.a : value.__$message;
-		var stopPropagation = tag == 1 ? value.b : tag == 3 && value.__$stopPropagation;
+		var message = !tag ? value : tag < 3 ? value.a : value.message;
+		var stopPropagation = tag == 1 ? value.b : tag == 3 && value.stopPropagation;
 		var currentEventNode = (
 			stopPropagation && event.stopPropagation(),
-			(tag == 2 ? value.b : tag == 3 && value.__$preventDefault) && event.preventDefault(),
+			(tag == 2 ? value.b : tag == 3 && value.preventDefault) && event.preventDefault(),
 			eventNode
 		);
 		var tagger;
@@ -1533,7 +1550,7 @@ function _VirtualDom_diffKeyedKids(xParent, yParent, patches, rootIndex)
 // ============================================================================
 
 
-var _VirtualDom_POSTFIX = '_elmW6BL';
+var _VirtualDom_POSTFIX = '_canopyW6BL';
 
 
 function _VirtualDom_insertNode(changes, localPatches, key, vnode, yIndex, inserts)
@@ -1700,7 +1717,7 @@ function _VirtualDom_addDomNodesHelp(domNode, vNode, patches, i, low, high, even
 			subNode = subNode.__node;
 		}
 
-		return _VirtualDom_addDomNodesHelp(domNode, subNode, patches, i, low + 1, high, domNode.elm_event_node_ref);
+		return _VirtualDom_addDomNodesHelp(domNode, subNode, patches, i, low + 1, high, domNode.canopy_event_node_ref);
 	}
 
 	// tag must be __2_NODE or __2_KEYED_NODE at this point
@@ -1780,13 +1797,13 @@ function _VirtualDom_applyPatch(domNode, patch)
 			return _VirtualDom_applyPatchesHelp(domNode, patch.__data);
 
 		case __3_TAGGER:
-			if (domNode.elm_event_node_ref)
+			if (domNode.canopy_event_node_ref)
 			{
-				domNode.elm_event_node_ref.__tagger = patch.__data;
+				domNode.canopy_event_node_ref.__tagger = patch.__data;
 			}
 			else
 			{
-				domNode.elm_event_node_ref = { __tagger: patch.__data, __parent: patch.__eventNode };
+				domNode.canopy_event_node_ref = { __tagger: patch.__data, __parent: patch.__eventNode };
 			}
 			return domNode;
 
@@ -1841,9 +1858,9 @@ function _VirtualDom_applyPatchRedraw(domNode, vNode, eventNode)
 	var parentNode = domNode.parentNode;
 	var newNode = _VirtualDom_render(vNode, eventNode);
 
-	if (!newNode.elm_event_node_ref)
+	if (!newNode.canopy_event_node_ref)
 	{
-		newNode.elm_event_node_ref = domNode.elm_event_node_ref;
+		newNode.canopy_event_node_ref = domNode.canopy_event_node_ref;
 	}
 
 	if (parentNode && newNode !== domNode)
@@ -1916,19 +1933,19 @@ function _VirtualDom_applyPatchReorderEndInsertsHelp(endInserts, patch)
 // ============================================================================
 
 
-function _VirtualDom_virtualize(node)
+function _VirtualDom_virtualize(domNode)
 {
 	// TEXT NODES
 
-	if (node.nodeType === 3)
+	if (domNode.nodeType === 3)
 	{
-		return text(node.textContent);
+		return text(domNode.textContent);
 	}
 
 
 	// WEIRD NODES
 
-	if (node.nodeType !== 1)
+	if (domNode.nodeType !== 1)
 	{
 		return text('');
 	}
@@ -1937,7 +1954,7 @@ function _VirtualDom_virtualize(node)
 	// ELEMENT NODES
 
 	var attrList = _List_Nil;
-	var attrs = node.attributes;
+	var attrs = domNode.attributes;
 	for (var i = attrs.length; i--; )
 	{
 		var attr = attrs[i];
@@ -1946,9 +1963,9 @@ function _VirtualDom_virtualize(node)
 		attrList = _List_Cons( A2(attribute, name, value), attrList );
 	}
 
-	var tag = node.tagName.toLowerCase();
+	var tag = domNode.tagName.toLowerCase();
 	var kidList = _List_Nil;
-	var kids = node.childNodes;
+	var kids = domNode.childNodes;
 
 	for (var i = kids.length; i--; )
 	{

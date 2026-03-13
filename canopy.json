@@ -3,7 +3,7 @@
     "name": "canopy/virtual-dom",
     "summary": "Core virtual DOM implementation, basis for HTML and SVG libraries",
     "license": "BSD-3-Clause",
-    "version": "1.0.3",
+    "version": "1.0.4",
     "exposed-modules": [
         "VirtualDom"
     ],
@@ -13,6 +13,6 @@
         "canopy/json": "1.0.0 <= v < 2.0.0"
     },
     "test-dependencies": {
-        "canopy/test": "1.0.0 <= v < 2.0.0"
+        "canopy/test": "1.0.0 <= v < 3.0.0"
     }
 }
