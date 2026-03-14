@@ -29,12 +29,25 @@ var _VirtualDom_MARKER = 'data-canopy';
 
 var _VirtualDom_JSON_SUCCEED = 0;
 
-var __2_TEXT = 0, __2_NODE = 1, __2_KEYED_NODE = 2;
-var __2_CUSTOM = 3, __2_TAGGER = 4, __2_THUNK = 5;
-var __3_REDRAW = 0, __3_FACTS = 1, __3_TEXT = 2, __3_THUNK = 3;
-var __3_TAGGER = 4, __3_REMOVE_LAST = 5, __3_APPEND = 6;
-var __3_CUSTOM = 7, __3_REMOVE = 8, __3_REORDER = 9;
-var __5_INSERT = 0, __5_REMOVE = 1, __5_MOVE = 2;
+var __2_TEXT = 0;
+var __2_NODE = 1;
+var __2_KEYED_NODE = 2;
+var __2_CUSTOM = 3;
+var __2_TAGGER = 4;
+var __2_THUNK = 5;
+var __3_REDRAW = 0;
+var __3_FACTS = 1;
+var __3_TEXT = 2;
+var __3_THUNK = 3;
+var __3_TAGGER = 4;
+var __3_REMOVE_LAST = 5;
+var __3_APPEND = 6;
+var __3_CUSTOM = 7;
+var __3_REMOVE = 8;
+var __3_REORDER = 9;
+var __5_INSERT = 0;
+var __5_REMOVE = 1;
+var __5_MOVE = 2;
 
 
 function _VirtualDom_appendChild(parent, child)
@@ -869,6 +882,7 @@ function _VirtualDom_applyFacts(domNode, eventNode, facts)
 {
 	for (var key in facts)
 	{
+		if (!Object.prototype.hasOwnProperty.call(facts, key)) continue;
 		var value = facts[key];
 
 		key === 'a__1_STYLE'
@@ -902,6 +916,7 @@ function _VirtualDom_applyStyles(domNode, styles)
 
 	for (var key in styles)
 	{
+		if (!Object.prototype.hasOwnProperty.call(styles, key)) continue;
 		var value = styles[key];
 		if (key.indexOf('--') === 0)
 		{
@@ -927,6 +942,7 @@ function _VirtualDom_applyAttrs(domNode, attrs)
 {
 	for (var key in attrs)
 	{
+		if (!Object.prototype.hasOwnProperty.call(attrs, key)) continue;
 		var value = attrs[key];
 		typeof value !== 'undefined'
 			? domNode.setAttribute(key, value)
@@ -945,6 +961,7 @@ function _VirtualDom_applyAttrsNS(domNode, nsAttrs)
 {
 	for (var key in nsAttrs)
 	{
+		if (!Object.prototype.hasOwnProperty.call(nsAttrs, key)) continue;
 		var pair = nsAttrs[key];
 		var namespace = pair.__namespace;
 		var value = pair.__value;
@@ -968,6 +985,7 @@ function _VirtualDom_applyEvents(domNode, eventNode, events)
 
 	for (var key in events)
 	{
+		if (!Object.prototype.hasOwnProperty.call(events, key)) continue;
 		var newHandler = events[key];
 		var oldCallback = allCallbacks[key];
 
@@ -1433,6 +1451,7 @@ function _VirtualDom_diffFacts(x, y, category)
 	// look for changes and removals
 	for (var xKey in x)
 	{
+		if (!Object.prototype.hasOwnProperty.call(x, xKey)) continue;
 		if (xKey === 'a__1_STYLE' || xKey === 'a__1_EVENT' || xKey === 'a__1_ATTR' || xKey === 'a__1_ATTR_NS')
 		{
 			var subDiff = _VirtualDom_diffFacts(x[xKey], y[xKey] || {}, xKey);
@@ -1481,6 +1500,7 @@ function _VirtualDom_diffFacts(x, y, category)
 	// add new stuff
 	for (var yKey in y)
 	{
+		if (!Object.prototype.hasOwnProperty.call(y, yKey)) continue;
 		if (!(yKey in x))
 		{
 			diff = diff || {};
