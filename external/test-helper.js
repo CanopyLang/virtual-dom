@@ -16,7 +16,8 @@
 //   foreign import javascript "external/test-helper.js" as TestHelperFFI
 
 // Node type constants (must match virtual-dom.js)
-var __TH_TEXT = 0, __TH_NODE = 1, __TH_KEYED_NODE = 2, __TH_CUSTOM = 3, __TH_TAGGER = 4, __TH_THUNK = 5;
+var __TH_TEXT = 0, __TH_NODE = 1, __TH_KEYED_NODE = 2, __TH_CUSTOM = 3;
+var __TH_TAGGER = 4, __TH_THUNK = 5;
 
 
 // Resolve a VirtualDom value that may be a partially-applied FN function
