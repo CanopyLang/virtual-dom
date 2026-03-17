@@ -20,8 +20,6 @@ function _VirtualDom_divertHrefToApp_push(fn) { _VirtualDom_divertHrefToApp_stac
 function _VirtualDom_divertHrefToApp_pop() { _VirtualDom_divertHrefToApp_stack.pop(); }
 function _VirtualDom_divertHrefToApp_current() { return _VirtualDom_divertHrefToApp_stack[_VirtualDom_divertHrefToApp_stack.length - 1]; }
 
-var _VirtualDom_eventNodes = new WeakMap();
-
 var _VirtualDom_doc = typeof document !== 'undefined' ? document : {};
 
 var _VirtualDom_nextMarkerId = 0;
@@ -35,19 +33,6 @@ var __2_KEYED_NODE = 2;
 var __2_CUSTOM = 3;
 var __2_TAGGER = 4;
 var __2_THUNK = 5;
-var __3_REDRAW = 0;
-var __3_FACTS = 1;
-var __3_TEXT = 2;
-var __3_THUNK = 3;
-var __3_TAGGER = 4;
-var __3_REMOVE_LAST = 5;
-var __3_APPEND = 6;
-var __3_CUSTOM = 7;
-var __3_REMOVE = 8;
-var __3_REORDER = 9;
-var __5_INSERT = 0;
-var __5_REMOVE = 1;
-var __5_MOVE = 2;
 
 
 function _VirtualDom_appendChild(parent, child)
@@ -92,7 +77,7 @@ var init = F4(function(virtualNode, flagDecoder, debugMetadata, args)
 	var node = args['node'];
 
 	node.parentNode.replaceChild(
-		_VirtualDom_render(virtualNode, function() {}),
+		_VirtualDom_renderDomNode(virtualNode, function() {}),
 		node
 	);
 
@@ -141,21 +126,17 @@ function text(string)
  */
 var nodeNS = F4(function(namespace, tag, factList, kidList)
 {
-	for (var kids = [], descendantsCount = 0; kidList.b; kidList = kidList.b) // WHILE_CONS
+	for (var kids = []; kidList.b; kidList = kidList.b) // WHILE_CONS
 	{
-		var kid = kidList.a;
-		descendantsCount += (kid.__descendantsCount || 0);
-		kids.push(kid);
+		kids.push(kidList.a);
 	}
-	descendantsCount += kids.length;
 
 	return {
 		$: __2_NODE,
 		__tag: tag,
 		__facts: _VirtualDom_organizeFacts(factList),
 		__kids: kids,
-		__namespace: namespace,
-		__descendantsCount: descendantsCount
+		__namespace: namespace
 	};
 });
 
@@ -192,21 +173,17 @@ var node = F3(function(tag, factList, kidList)
  */
 var keyedNodeNS = F4(function(namespace, tag, factList, kidList)
 {
-	for (var kids = [], descendantsCount = 0; kidList.b; kidList = kidList.b) // WHILE_CONS
+	for (var kids = []; kidList.b; kidList = kidList.b) // WHILE_CONS
 	{
-		var kid = kidList.a;
-		descendantsCount += (kid.b.__descendantsCount || 0);
-		kids.push(kid);
+		kids.push(kidList.a);
 	}
-	descendantsCount += kids.length;
 
 	return {
 		$: __2_KEYED_NODE,
 		__tag: tag,
 		__facts: _VirtualDom_organizeFacts(factList),
 		__kids: kids,
-		__namespace: namespace,
-		__descendantsCount: descendantsCount
+		__namespace: namespace
 	};
 });
 
@@ -270,8 +247,7 @@ var map = F2(function(tagger, node)
 	return {
 		$: __2_TAGGER,
 		__tagger: tagger,
-		__node: node,
-		__descendantsCount: 1 + (node.__descendantsCount || 0)
+		__node: node
 	};
 });
 
@@ -792,11 +768,32 @@ function _VirtualDom_addClass(object, key, newClass)
 
 
 // ============================================================================
+// tNODE DATA STRUCTURE
+//
+// A tNode is a parallel tree that stores DOM node references alongside the
+// virtual DOM tree. This eliminates the need to walk the live DOM during
+// diff+patch, making the implementation immune to browser extensions
+// (Grammarly, password managers, ad blockers) that inject/remove DOM nodes.
+//
+// Structure by vnode type:
+//   TEXT:       { __domNode }
+//   NODE:       { __domNode, __kids: [tNode] }
+//   KEYED_NODE: { __domNode, __kids: [tNode] }
+//   CUSTOM:     { __domNode }
+//   TAGGER:     { __tagger, __child: tNode }
+//   THUNK:      (delegates to inner node's tNode)
+// ============================================================================
+
+
+// ============================================================================
 // RENDER
 //
-// Convert a virtual DOM tree into real DOM nodes. The eventNode parameter
-// is a linked list of tagger functions that transform messages as they
-// bubble up through nested `map` calls.
+// Convert a virtual DOM tree into real DOM nodes AND build the parallel tNode
+// tree. The eventNode parameter is a function (sendToApp) that dispatches
+// messages. Tagger nodes wrap it via function composition.
+//
+// Returns a tNode. The DOM node is stored in tNode.__domNode (or in the
+// innermost tNode for tagger chains).
 // ============================================================================
 
 
@@ -811,7 +808,8 @@ function _VirtualDom_render(vNode, eventNode)
 
 	if (tag === __2_TEXT)
 	{
-		return _VirtualDom_doc.createTextNode(vNode.__text);
+		var domNode = _VirtualDom_doc.createTextNode(vNode.__text);
+		return { __domNode: domNode };
 	}
 
 	if (tag === __2_TAGGER)
@@ -828,10 +826,9 @@ function _VirtualDom_render(vNode, eventNode)
 			subNode = subNode.__node;
 		}
 
-		var subEventRoot = { __tagger: tagger, __parent: eventNode };
-		var domNode = _VirtualDom_render(subNode, subEventRoot);
-		_VirtualDom_eventNodes.set(domNode, subEventRoot);
-		return domNode;
+		var subEventRoot = _VirtualDom_wrapEventNode(tagger, eventNode);
+		var childTNode = _VirtualDom_render(subNode, subEventRoot);
+		return { __tagger: tagger, __eventNode: subEventRoot, __child: childTNode };
 	}
 
 	if (tag === __2_CUSTOM)
@@ -839,7 +836,7 @@ function _VirtualDom_render(vNode, eventNode)
 		var domNode = vNode.__render(vNode.__model);
 		if (domNode.setAttribute) { domNode.setAttribute(_VirtualDom_MARKER, _VirtualDom_nextMarkerId++); }
 		_VirtualDom_applyFacts(domNode, eventNode, vNode.__facts);
-		return domNode;
+		return { __domNode: domNode };
 	}
 
 	// at this point `tag` must be __2_NODE or __2_KEYED_NODE
@@ -848,7 +845,7 @@ function _VirtualDom_render(vNode, eventNode)
 		? _VirtualDom_doc.createElementNS(vNode.__namespace, vNode.__tag)
 		: _VirtualDom_doc.createElement(vNode.__tag);
 
-	// Stamp marker for tNode-based DOM pairing
+	// Stamp marker for extension-safe DOM identification
 	domNode.setAttribute(_VirtualDom_MARKER, _VirtualDom_nextMarkerId++);
 
 	var _divertHref = _VirtualDom_divertHrefToApp_current();
@@ -859,12 +856,66 @@ function _VirtualDom_render(vNode, eventNode)
 
 	_VirtualDom_applyFacts(domNode, eventNode, vNode.__facts);
 
-	for (var kids = vNode.__kids, i = 0; i < kids.length; i++)
+	var kids = vNode.__kids;
+	var tNodeKids = new Array(kids.length);
+	for (var i = 0; i < kids.length; i++)
 	{
-		_VirtualDom_appendChild(domNode, _VirtualDom_render(tag === __2_NODE ? kids[i] : kids[i].b, eventNode));
+		var kidVNode = tag === __2_NODE ? kids[i] : kids[i].b;
+		var kidTNode = _VirtualDom_render(kidVNode, eventNode);
+		tNodeKids[i] = kidTNode;
+		_VirtualDom_appendChild(domNode, _VirtualDom_tNodeDomNode(kidTNode));
 	}
 
-	return domNode;
+	return { __domNode: domNode, __kids: tNodeKids };
+}
+
+
+/**
+ * Extract the DOM node from a tNode. For tagger tNodes, this walks down to
+ * the innermost child where the actual DOM node lives.
+ */
+function _VirtualDom_tNodeDomNode(tNode)
+{
+	while (tNode.__child)
+	{
+		tNode = tNode.__child;
+	}
+	return tNode.__domNode;
+}
+
+
+/**
+ * Wrap an eventNode (sendToApp function) with a tagger chain, producing
+ * a new function that applies tagger transformations before dispatching.
+ */
+function _VirtualDom_wrapEventNode(tagger, eventNode)
+{
+	return function(msg, isSync) {
+		if (typeof tagger === 'function')
+		{
+			msg = tagger(msg);
+		}
+		else
+		{
+			for (var i = tagger.length; i--; )
+			{
+				msg = tagger[i](msg);
+			}
+		}
+		return eventNode(msg, isSync);
+	};
+}
+
+
+/**
+ * Legacy render adapter: returns just the DOM node (for call sites that
+ * expect a plain DOM node). Creates the tNode internally but only returns
+ * the DOM node.
+ */
+function _VirtualDom_renderDomNode(vNode, eventNode)
+{
+	var tNode = _VirtualDom_render(vNode, eventNode);
+	return _VirtualDom_tNodeDomNode(tNode);
 }
 
 
@@ -1001,7 +1052,10 @@ function _VirtualDom_applyEvents(domNode, eventNode, events)
 			var oldHandler = oldCallback.__handler;
 			if (oldHandler.$ === newHandler.$)
 			{
+				// Always update both handler and eventNode — cheap (no DOM API
+				// calls) and guarantees correct tagger wrapping after diff.
 				oldCallback.__handler = newHandler;
+				oldCallback.__eventNode = eventNode;
 				continue;
 			}
 			domNode.removeEventListener(key, oldCallback);
@@ -1210,32 +1264,18 @@ function _VirtualDom_makeCallback(eventNode, initialHandler)
 		var value = result.a;
 		var message = !tag ? value : tag < 3 ? value.a : value.message;
 		var stopPropagation = tag == 1 ? value.b : tag == 3 && value.stopPropagation;
-		var currentEventNode = (
-			stopPropagation && event.stopPropagation(),
-			(tag == 2 ? value.b : tag == 3 && value.preventDefault) && event.preventDefault(),
-			eventNode
-		);
-		var tagger;
-		var i;
-		while (tagger = currentEventNode.__tagger)
-		{
-			if (typeof tagger == 'function')
-			{
-				message = tagger(message);
-			}
-			else
-			{
-				for (var i = tagger.length; i--; )
-				{
-					message = tagger[i](message);
-				}
-			}
-			currentEventNode = currentEventNode.__parent;
-		}
-		currentEventNode(message, stopPropagation); // stopPropagation implies isSync
+
+		stopPropagation && event.stopPropagation();
+		(tag == 2 ? value.b : tag == 3 && value.preventDefault) && event.preventDefault();
+
+		// eventNode is a function (sendToApp or wrapped sendToApp) — call directly.
+		// No tagger chain walking needed; taggers are composed into eventNode
+		// via _VirtualDom_wrapEventNode.
+		callback.__eventNode(message, stopPropagation); // stopPropagation implies isSync
 	}
 
 	callback.__handler = initialHandler;
+	callback.__eventNode = eventNode;
 
 	return callback;
 }
@@ -1248,164 +1288,18 @@ function _VirtualDom_equalEvents(x, y)
 
 
 // ============================================================================
-// DIFF
+// DIFF (Legacy wrapper)
 //
-// Computes a list of patches that describe how to transform the old virtual
-// DOM tree into the new one. Each patch records its target index (position
-// in a depth-first traversal) so that the patcher can skip unchanged subtrees.
+// Returns the new vnode directly. The actual diffing is done by
+// _VirtualDom_applyPatches which performs combined diff+patch via tNodes.
 // ============================================================================
 
 
 function _VirtualDom_diff(x, y)
 {
-	var patches = [];
-	_VirtualDom_diffHelp(x, y, patches, 0);
-	return patches;
+	return y;
 }
 
-
-function _VirtualDom_pushPatch(patches, type, index, data)
-{
-	var patch = {
-		$: type,
-		__index: index,
-		__data: data,
-		__domNode: undefined,
-		__eventNode: undefined
-	};
-	patches.push(patch);
-	return patch;
-}
-
-
-function _VirtualDom_diffHelp(x, y, patches, index)
-{
-	if (x === y)
-	{
-		return;
-	}
-
-	var xType = x.$;
-	var yType = y.$;
-
-	// Bail if you run into different types of nodes. Implies that the
-	// structure has changed significantly and it's not worth a diff.
-	if (xType !== yType)
-	{
-		if (xType === __2_NODE && yType === __2_KEYED_NODE)
-		{
-			y = _VirtualDom_dekey(y);
-			yType = __2_NODE;
-		}
-		else
-		{
-			_VirtualDom_pushPatch(patches, __3_REDRAW, index, y);
-			return;
-		}
-	}
-
-	// Now we know that both nodes are the same $.
-	switch (yType)
-	{
-		case __2_THUNK:
-			var xRefs = x.__refs;
-			var yRefs = y.__refs;
-			var i = xRefs.length;
-			var same = i === yRefs.length;
-			while (same && i--)
-			{
-				same = xRefs[i] === yRefs[i];
-			}
-			if (same)
-			{
-				y.__node = x.__node;
-				return;
-			}
-			y.__node = y.__thunk();
-			var subPatches = [];
-			_VirtualDom_diffHelp(x.__node, y.__node, subPatches, 0);
-			subPatches.length > 0 && _VirtualDom_pushPatch(patches, __3_THUNK, index, subPatches);
-			return;
-
-		case __2_TAGGER:
-			// gather nested taggers
-			var xTaggers = x.__tagger;
-			var yTaggers = y.__tagger;
-			var nesting = false;
-
-			var xSubNode = x.__node;
-			while (xSubNode.$ === __2_TAGGER)
-			{
-				nesting = true;
-
-				typeof xTaggers !== 'object'
-					? xTaggers = [xTaggers, xSubNode.__tagger]
-					: xTaggers.push(xSubNode.__tagger);
-
-				xSubNode = xSubNode.__node;
-			}
-
-			var ySubNode = y.__node;
-			while (ySubNode.$ === __2_TAGGER)
-			{
-				nesting = true;
-
-				typeof yTaggers !== 'object'
-					? yTaggers = [yTaggers, ySubNode.__tagger]
-					: yTaggers.push(ySubNode.__tagger);
-
-				ySubNode = ySubNode.__node;
-			}
-
-			// Just bail if different numbers of taggers. This implies the
-			// structure of the virtual DOM has changed.
-			if (nesting && xTaggers.length !== yTaggers.length)
-			{
-				_VirtualDom_pushPatch(patches, __3_REDRAW, index, y);
-				return;
-			}
-
-			// check if taggers are "the same"
-			if (nesting ? !_VirtualDom_pairwiseRefEqual(xTaggers, yTaggers) : xTaggers !== yTaggers)
-			{
-				_VirtualDom_pushPatch(patches, __3_TAGGER, index, yTaggers);
-			}
-
-			// diff everything below the taggers
-			_VirtualDom_diffHelp(xSubNode, ySubNode, patches, index + 1);
-			return;
-
-		case __2_TEXT:
-			if (x.__text !== y.__text)
-			{
-				_VirtualDom_pushPatch(patches, __3_TEXT, index, y.__text);
-			}
-			return;
-
-		case __2_NODE:
-			_VirtualDom_diffNodes(x, y, patches, index, _VirtualDom_diffKids);
-			return;
-
-		case __2_KEYED_NODE:
-			_VirtualDom_diffNodes(x, y, patches, index, _VirtualDom_diffKeyedKids);
-			return;
-
-		case __2_CUSTOM:
-			if (x.__render !== y.__render)
-			{
-				_VirtualDom_pushPatch(patches, __3_REDRAW, index, y);
-				return;
-			}
-
-			var factsDiff = _VirtualDom_diffFacts(x.__facts, y.__facts);
-			factsDiff && _VirtualDom_pushPatch(patches, __3_FACTS, index, factsDiff);
-
-			var patch = y.__diff(x.__model, y.__model);
-			patch && _VirtualDom_pushPatch(patches, __3_CUSTOM, index, patch);
-
-			return;
-	}
-}
 
 // assumes the incoming arrays are the same length
 function _VirtualDom_pairwiseRefEqual(as, bs)
@@ -1419,22 +1313,6 @@ function _VirtualDom_pairwiseRefEqual(as, bs)
 	}
 
 	return true;
-}
-
-function _VirtualDom_diffNodes(x, y, patches, index, diffKids)
-{
-	// Bail if obvious indicators have changed. Implies more serious
-	// structural changes such that it's not worth it to diff.
-	if (x.__tag !== y.__tag || x.__namespace !== y.__namespace)
-	{
-		_VirtualDom_pushPatch(patches, __3_REDRAW, index, y);
-		return;
-	}
-
-	var factsDiff = _VirtualDom_diffFacts(x.__facts, y.__facts);
-	factsDiff && _VirtualDom_pushPatch(patches, __3_FACTS, index, factsDiff);
-
-	diffKids(x, y, patches, index);
 }
 
 
@@ -1514,603 +1392,85 @@ function _VirtualDom_diffFacts(x, y, category)
 
 
 // ============================================================================
-// DIFF KIDS
+// APPLY PATCHES (Legacy wrapper)
 //
-// Pairwise diff of non-keyed children. Handles length mismatches by
-// emitting REMOVE_LAST or APPEND patches.
+// In the tNode architecture, _VirtualDom_diff returns the new vnode directly.
+// _VirtualDom_applyPatches performs the combined diff+patch using the tNode
+// tree stored on the root DOM node.
 // ============================================================================
 
 
-function _VirtualDom_diffKids(xParent, yParent, patches, index)
+function _VirtualDom_applyPatches(rootDomNode, oldVirtualNode, newVirtualNode, eventNode)
 {
-	var xKids = xParent.__kids;
-	var yKids = yParent.__kids;
+	// newVirtualNode is what _VirtualDom_diff returned (just the new vnode)
+	var tNode = rootDomNode.__canopyTree;
 
-	var xLen = xKids.length;
-	var yLen = yKids.length;
-
-	// FIGURE OUT IF THERE ARE INSERTS OR REMOVALS
-
-	if (xLen > yLen)
+	if (!tNode)
 	{
-		_VirtualDom_pushPatch(patches, __3_REMOVE_LAST, index, {
-			__length: yLen,
-			__diff: xLen - yLen
-		});
-	}
-	else if (xLen < yLen)
-	{
-		_VirtualDom_pushPatch(patches, __3_APPEND, index, {
-			__length: xLen,
-			__kids: yKids
-		});
+		// First call — no tNode exists yet (e.g., initial virtualize path).
+		// Build a tNode from the existing DOM.
+		tNode = _VirtualDom_buildTNode(rootDomNode, oldVirtualNode);
 	}
 
-	// PAIRWISE DIFF EVERYTHING ELSE
-
-	for (var minLen = xLen < yLen ? xLen : yLen, i = 0; i < minLen; i++)
-	{
-		var xKid = xKids[i];
-		_VirtualDom_diffHelp(xKid, yKids[i], patches, ++index);
-		index += xKid.__descendantsCount || 0;
-	}
+	var newTNode = _VirtualDom_updateTNode(tNode, oldVirtualNode, newVirtualNode, eventNode);
+	var newDomNode = _VirtualDom_tNodeDomNode(newTNode);
+	newDomNode.__canopyTree = newTNode;
+	return newDomNode;
 }
 
 
-
-// ============================================================================
-// KEYED DIFF
-//
-// Diff keyed children using a look-ahead strategy. Tracks insertions,
-// removals, and moves via a changes dictionary keyed by the child's
-// string key. Falls back to brute-force insert/remove when keys
-// don't match.
-// ============================================================================
-
-
-function _VirtualDom_diffKeyedKids(xParent, yParent, patches, rootIndex)
+/**
+ * Build a tNode tree from an existing DOM node and vnode, for the case
+ * where we need to bootstrap the tNode tree from pre-existing DOM
+ * (e.g., after _VirtualDom_virtualize).
+ */
+function _VirtualDom_buildTNode(domNode, vNode)
 {
-	var localPatches = [];
-
-	var changes = {}; // Dict String Entry
-	var inserts = []; // Array { index : Int, entry : Entry }
-	// type Entry = { tag : String, vnode : VNode, index : Int, data : _ }
-
-	var xKids = xParent.__kids;
-	var yKids = yParent.__kids;
-	var xLen = xKids.length;
-	var yLen = yKids.length;
-	var xIndex = 0;
-	var yIndex = 0;
-
-	var index = rootIndex;
-
-	while (xIndex < xLen && yIndex < yLen)
-	{
-		var x = xKids[xIndex];
-		var y = yKids[yIndex];
-
-		var xKey = x.a;
-		var yKey = y.a;
-		var xNode = x.b;
-		var yNode = y.b;
-
-		var newMatch = undefined;
-		var oldMatch = undefined;
-
-		// check if keys match
-
-		if (xKey === yKey)
-		{
-			index++;
-			_VirtualDom_diffHelp(xNode, yNode, localPatches, index);
-			index += xNode.__descendantsCount || 0;
-
-			xIndex++;
-			yIndex++;
-			continue;
-		}
-
-		// look ahead 1 to detect insertions and removals.
-
-		var xNext = xKids[xIndex + 1];
-		var yNext = yKids[yIndex + 1];
-
-		if (xNext)
-		{
-			var xNextKey = xNext.a;
-			var xNextNode = xNext.b;
-			oldMatch = yKey === xNextKey;
-		}
-
-		if (yNext)
-		{
-			var yNextKey = yNext.a;
-			var yNextNode = yNext.b;
-			newMatch = xKey === yNextKey;
-		}
-
-
-		// swap x and y
-		if (newMatch && oldMatch)
-		{
-			index++;
-			_VirtualDom_diffHelp(xNode, yNextNode, localPatches, index);
-			_VirtualDom_insertNode(changes, localPatches, xKey, yNode, yIndex, inserts);
-			index += xNode.__descendantsCount || 0;
-
-			index++;
-			_VirtualDom_removeNode(changes, localPatches, xKey, xNextNode, index);
-			index += xNextNode.__descendantsCount || 0;
-
-			xIndex += 2;
-			yIndex += 2;
-			continue;
-		}
-
-		// insert y
-		if (newMatch)
-		{
-			index++;
-			_VirtualDom_insertNode(changes, localPatches, yKey, yNode, yIndex, inserts);
-			_VirtualDom_diffHelp(xNode, yNextNode, localPatches, index);
-			index += xNode.__descendantsCount || 0;
-
-			xIndex += 1;
-			yIndex += 2;
-			continue;
-		}
-
-		// remove x
-		if (oldMatch)
-		{
-			index++;
-			_VirtualDom_removeNode(changes, localPatches, xKey, xNode, index);
-			index += xNode.__descendantsCount || 0;
-
-			index++;
-			_VirtualDom_diffHelp(xNextNode, yNode, localPatches, index);
-			index += xNextNode.__descendantsCount || 0;
-
-			xIndex += 2;
-			yIndex += 1;
-			continue;
-		}
-
-		// remove x, insert y
-		if (xNext && xNextKey === yNextKey)
-		{
-			index++;
-			_VirtualDom_removeNode(changes, localPatches, xKey, xNode, index);
-			_VirtualDom_insertNode(changes, localPatches, yKey, yNode, yIndex, inserts);
-			index += xNode.__descendantsCount || 0;
-
-			index++;
-			_VirtualDom_diffHelp(xNextNode, yNextNode, localPatches, index);
-			index += xNextNode.__descendantsCount || 0;
-
-			xIndex += 2;
-			yIndex += 2;
-			continue;
-		}
-
-		break;
-	}
-
-	// eat up any remaining nodes with removeNode and insertNode
-
-	while (xIndex < xLen)
-	{
-		index++;
-		var x = xKids[xIndex];
-		var xNode = x.b;
-		_VirtualDom_removeNode(changes, localPatches, x.a, xNode, index);
-		index += xNode.__descendantsCount || 0;
-		xIndex++;
-	}
-
-	while (yIndex < yLen)
-	{
-		var endInserts = endInserts || [];
-		var y = yKids[yIndex];
-		_VirtualDom_insertNode(changes, localPatches, y.a, y.b, undefined, endInserts);
-		yIndex++;
-	}
-
-	if (localPatches.length > 0 || inserts.length > 0 || endInserts)
-	{
-		_VirtualDom_pushPatch(patches, __3_REORDER, rootIndex, {
-			__patches: localPatches,
-			__inserts: inserts,
-			__endInserts: endInserts
-		});
-	}
-}
-
-
-
-// ============================================================================
-// CHANGES FROM KEYED DIFF
-//
-// Track insertions, removals, and moves of keyed children. When a removed
-// key is later inserted (or vice versa), the entry is promoted to a MOVE
-// and the sub-patches are recorded.
-// ============================================================================
-
-
-var _VirtualDom_POSTFIX = '_canopyW6BL';
-
-
-function _VirtualDom_insertNode(changes, localPatches, key, vnode, yIndex, inserts)
-{
-	var entry = changes[key];
-
-	// never seen this key before
-	if (!entry)
-	{
-		entry = {
-			__tag: __5_INSERT,
-			__vnode: vnode,
-			__index: yIndex,
-			__data: undefined
-		};
-
-		inserts.push({ __index: yIndex, __entry: entry });
-		changes[key] = entry;
-
-		return;
-	}
-
-	// this key was removed earlier, a match!
-	if (entry.__tag === __5_REMOVE)
-	{
-		inserts.push({ __index: yIndex, __entry: entry });
-
-		entry.__tag = __5_MOVE;
-		var subPatches = [];
-		_VirtualDom_diffHelp(entry.__vnode, vnode, subPatches, entry.__index);
-		entry.__index = yIndex;
-		entry.__data.__data = {
-			__patches: subPatches,
-			__entry: entry
-		};
-
-		return;
-	}
-
-	// this key has already been inserted or moved, a duplicate!
-	_VirtualDom_insertNode(changes, localPatches, key + _VirtualDom_POSTFIX, vnode, yIndex, inserts);
-}
-
-
-function _VirtualDom_removeNode(changes, localPatches, key, vnode, index)
-{
-	var entry = changes[key];
-
-	// never seen this key before
-	if (!entry)
-	{
-		var patch = _VirtualDom_pushPatch(localPatches, __3_REMOVE, index, undefined);
-
-		changes[key] = {
-			__tag: __5_REMOVE,
-			__vnode: vnode,
-			__index: index,
-			__data: patch
-		};
-
-		return;
-	}
-
-	// this key was inserted earlier, a match!
-	if (entry.__tag === __5_INSERT)
-	{
-		entry.__tag = __5_MOVE;
-		var subPatches = [];
-		_VirtualDom_diffHelp(vnode, entry.__vnode, subPatches, index);
-
-		_VirtualDom_pushPatch(localPatches, __3_REMOVE, index, {
-			__patches: subPatches,
-			__entry: entry
-		});
-
-		return;
-	}
-
-	// this key has already been removed or moved, a duplicate!
-	_VirtualDom_removeNode(changes, localPatches, key + _VirtualDom_POSTFIX, vnode, index);
-}
-
-
-
-// ============================================================================
-// ADD DOM NODES
-//
-// Each DOM node has an "index" assigned in order of traversal. It is important
-// to minimize our crawl over the actual DOM, so these indexes (along with the
-// descendantsCount of virtual nodes) let us skip touching entire subtrees of
-// the DOM if we know there are no patches there.
-// ============================================================================
-
-
-function _VirtualDom_addDomNodes(domNode, vNode, patches, eventNode)
-{
-	_VirtualDom_addDomNodesHelp(domNode, vNode, patches, 0, 0, vNode.__descendantsCount, eventNode);
-}
-
-
-// assumes `patches` is non-empty and indexes increase monotonically.
-function _VirtualDom_addDomNodesHelp(domNode, vNode, patches, i, low, high, eventNode)
-{
-	var patch = patches[i];
-	var index = patch.__index;
-
-	while (index === low)
-	{
-		var patchType = patch.$;
-
-		if (patchType === __3_THUNK)
-		{
-			_VirtualDom_addDomNodes(domNode, vNode.__node, patch.__data, eventNode);
-		}
-		else if (patchType === __3_REORDER)
-		{
-			patch.__domNode = domNode;
-			patch.__eventNode = eventNode;
-
-			var subPatches = patch.__data.__patches;
-			if (subPatches.length > 0)
-			{
-				_VirtualDom_addDomNodesHelp(domNode, vNode, subPatches, 0, low, high, eventNode);
-			}
-		}
-		else if (patchType === __3_REMOVE)
-		{
-			patch.__domNode = domNode;
-			patch.__eventNode = eventNode;
-
-			var data = patch.__data;
-			if (data)
-			{
-				data.__entry.__data = domNode;
-				var subPatches = data.__patches;
-				if (subPatches.length > 0)
-				{
-					_VirtualDom_addDomNodesHelp(domNode, vNode, subPatches, 0, low, high, eventNode);
-				}
-			}
-		}
-		else
-		{
-			patch.__domNode = domNode;
-			patch.__eventNode = eventNode;
-		}
-
-		i++;
-
-		if (!(patch = patches[i]) || (index = patch.__index) > high)
-		{
-			return i;
-		}
-	}
-
 	var tag = vNode.$;
+
+	if (tag === __2_THUNK)
+	{
+		return _VirtualDom_buildTNode(domNode, vNode.__node || (vNode.__node = vNode.__thunk()));
+	}
+
+	if (tag === __2_TEXT)
+	{
+		return { __domNode: domNode };
+	}
 
 	if (tag === __2_TAGGER)
 	{
 		var subNode = vNode.__node;
+		var tagger = vNode.__tagger;
 
 		while (subNode.$ === __2_TAGGER)
 		{
+			typeof tagger !== 'object'
+				? tagger = [tagger, subNode.__tagger]
+				: tagger.push(subNode.__tagger);
 			subNode = subNode.__node;
 		}
 
-		return _VirtualDom_addDomNodesHelp(domNode, subNode, patches, i, low + 1, high, _VirtualDom_eventNodes.get(domNode));
+		var childTNode = _VirtualDom_buildTNode(domNode, subNode);
+		return { __tagger: tagger, __eventNode: undefined, __child: childTNode };
 	}
 
-	// tag must be __2_NODE or __2_KEYED_NODE at this point
+	if (tag === __2_CUSTOM)
+	{
+		return { __domNode: domNode };
+	}
 
-	var vKids = vNode.__kids;
+	// NODE or KEYED_NODE
+	var kids = vNode.__kids;
 	var childNodes = domNode.childNodes;
-	for (var j = 0; j < vKids.length; j++)
+	var tNodeKids = new Array(kids.length);
+	for (var i = 0; i < kids.length && i < childNodes.length; i++)
 	{
-		low++;
-		var vKid = tag === __2_NODE ? vKids[j] : vKids[j].b;
-		var nextLow = low + (vKid.__descendantsCount || 0);
-		if (low <= index && index <= nextLow)
-		{
-			i = _VirtualDom_addDomNodesHelp(childNodes[j], vKid, patches, i, low, nextLow, eventNode);
-			if (!(patch = patches[i]) || (index = patch.__index) > high)
-			{
-				return i;
-			}
-		}
-		low = nextLow;
-	}
-	return i;
-}
-
-
-
-// ============================================================================
-// APPLY PATCHES
-//
-// Walk the patch list, locate each target DOM node, and apply the
-// corresponding transformation (redraw, update facts, replace text, etc.).
-// ============================================================================
-
-
-function _VirtualDom_applyPatches(rootDomNode, oldVirtualNode, patches, eventNode)
-{
-	if (patches.length === 0)
-	{
-		return rootDomNode;
+		var kidVNode = tag === __2_NODE ? kids[i] : kids[i].b;
+		tNodeKids[i] = _VirtualDom_buildTNode(childNodes[i], kidVNode);
 	}
 
-	_VirtualDom_addDomNodes(rootDomNode, oldVirtualNode, patches, eventNode);
-	return _VirtualDom_applyPatchesHelp(rootDomNode, patches);
-}
-
-function _VirtualDom_applyPatchesHelp(rootDomNode, patches)
-{
-	for (var i = 0; i < patches.length; i++)
-	{
-		var patch = patches[i];
-		var localDomNode = patch.__domNode
-		var newNode = _VirtualDom_applyPatch(localDomNode, patch);
-		if (localDomNode === rootDomNode)
-		{
-			rootDomNode = newNode;
-		}
-	}
-	return rootDomNode;
-}
-
-function _VirtualDom_applyPatch(domNode, patch)
-{
-	switch (patch.$)
-	{
-		case __3_REDRAW:
-			return _VirtualDom_applyPatchRedraw(domNode, patch.__data, patch.__eventNode);
-
-		case __3_FACTS:
-			_VirtualDom_applyFacts(domNode, patch.__eventNode, patch.__data);
-			return domNode;
-
-		case __3_TEXT:
-			domNode.replaceData(0, domNode.length, patch.__data);
-			return domNode;
-
-		case __3_THUNK:
-			return _VirtualDom_applyPatchesHelp(domNode, patch.__data);
-
-		case __3_TAGGER:
-			var existingEventNode = _VirtualDom_eventNodes.get(domNode);
-			if (existingEventNode)
-			{
-				existingEventNode.__tagger = patch.__data;
-			}
-			else
-			{
-				_VirtualDom_eventNodes.set(domNode, { __tagger: patch.__data, __parent: patch.__eventNode });
-			}
-			return domNode;
-
-		case __3_REMOVE_LAST:
-			var data = patch.__data;
-			for (var i = 0; i < data.__diff; i++)
-			{
-				domNode.removeChild(domNode.childNodes[data.__length]);
-			}
-			return domNode;
-
-		case __3_APPEND:
-			var data = patch.__data;
-			var kids = data.__kids;
-			var i = data.__length;
-			var theEnd = domNode.childNodes[i];
-			for (; i < kids.length; i++)
-			{
-				domNode.insertBefore(_VirtualDom_render(kids[i], patch.__eventNode), theEnd);
-			}
-			return domNode;
-
-		case __3_REMOVE:
-			var data = patch.__data;
-			if (!data)
-			{
-				domNode.parentNode.removeChild(domNode);
-				return domNode;
-			}
-			var entry = data.__entry;
-			if (typeof entry.__index !== 'undefined')
-			{
-				domNode.parentNode.removeChild(domNode);
-			}
-			entry.__data = _VirtualDom_applyPatchesHelp(domNode, data.__patches);
-			return domNode;
-
-		case __3_REORDER:
-			return _VirtualDom_applyPatchReorder(domNode, patch);
-
-		case __3_CUSTOM:
-			return patch.__data(domNode);
-
-		default:
-			throw new Error('Ran into an unknown patch!');
-	}
-}
-
-
-function _VirtualDom_applyPatchRedraw(domNode, vNode, eventNode)
-{
-	var parentNode = domNode.parentNode;
-	var newNode = _VirtualDom_render(vNode, eventNode);
-
-	if (!_VirtualDom_eventNodes.has(newNode))
-	{
-		var oldEventNode = _VirtualDom_eventNodes.get(domNode);
-		if (oldEventNode) { _VirtualDom_eventNodes.set(newNode, oldEventNode); }
-	}
-
-	if (parentNode && newNode !== domNode)
-	{
-		parentNode.replaceChild(newNode, domNode);
-	}
-	return newNode;
-}
-
-
-function _VirtualDom_applyPatchReorder(domNode, patch)
-{
-	var data = patch.__data;
-
-	// remove end inserts
-	var frag = _VirtualDom_applyPatchReorderEndInsertsHelp(data.__endInserts, patch);
-
-	// removals
-	domNode = _VirtualDom_applyPatchesHelp(domNode, data.__patches);
-
-	// inserts
-	var inserts = data.__inserts;
-	for (var i = 0; i < inserts.length; i++)
-	{
-		var insert = inserts[i];
-		var entry = insert.__entry;
-		var node = entry.__tag === __5_MOVE
-			? entry.__data
-			: _VirtualDom_render(entry.__vnode, patch.__eventNode);
-		domNode.insertBefore(node, domNode.childNodes[insert.__index]);
-	}
-
-	// add end inserts
-	if (frag)
-	{
-		_VirtualDom_appendChild(domNode, frag);
-	}
-
-	return domNode;
-}
-
-
-function _VirtualDom_applyPatchReorderEndInsertsHelp(endInserts, patch)
-{
-	if (!endInserts)
-	{
-		return;
-	}
-
-	var frag = _VirtualDom_doc.createDocumentFragment();
-	for (var i = 0; i < endInserts.length; i++)
-	{
-		var insert = endInserts[i];
-		var entry = insert.__entry;
-		_VirtualDom_appendChild(frag, entry.__tag === __5_MOVE
-			? entry.__data
-			: _VirtualDom_render(entry.__vnode, patch.__eventNode)
-		);
-	}
-	return frag;
+	return { __domNode: domNode, __kids: tNodeKids };
 }
 
 
@@ -2190,8 +1550,7 @@ function _VirtualDom_dekey(keyedNode)
 		__tag: keyedNode.__tag,
 		__facts: keyedNode.__facts,
 		__kids: kids,
-		__namespace: keyedNode.__namespace,
-		__descendantsCount: keyedNode.__descendantsCount
+		__namespace: keyedNode.__namespace
 	};
 }
 
@@ -2200,78 +1559,69 @@ function _VirtualDom_dekey(keyedNode)
 // ============================================================================
 // COMBINED DIFF + PATCH (tNode Architecture)
 //
-// Instead of producing a patch list and then applying it in a second pass,
-// walk old vdom + new vdom + DOM simultaneously, applying changes inline.
-// Uses data-canopy markers to identify own DOM nodes, skipping any nodes
-// injected by browser extensions (Grammarly, LastPass, 1Password, etc.).
+// Walk old vdom, new vdom, and the tNode tree simultaneously. The tNode tree
+// stores DOM node references, eliminating all DOM walking. Changes are applied
+// inline — no patch objects are allocated.
+//
+// This is immune to browser extensions (Grammarly, LastPass, 1Password, etc.)
+// because we never traverse live DOM children to find our nodes.
 // ============================================================================
 
 
 /**
- * Get the "own" children of a DOM node — those with data-canopy markers or
- * text nodes — skipping any element nodes injected by browser extensions.
- * Also handles Google Translate which wraps text in <font> tags.
+ * Render a new vdom tree into the DOM, replacing the old DOM node, and return
+ * the new tNode. Used when a redraw is needed (type change, tag change, etc.).
  */
-function _VirtualDom_ownChildren(domNode)
-{
-	var result = [];
-	var childNodes = domNode.childNodes;
-	for (var i = 0; i < childNodes.length; i++)
-	{
-		var child = childNodes[i];
-		if (child.nodeType === 3)
-		{
-			// Text node — always ours
-			result.push(child);
-		}
-		else if (child.nodeType === 1 && child.hasAttribute(_VirtualDom_MARKER))
-		{
-			// Element node with our marker — ours
-			result.push(child);
-		}
-		// Otherwise skip (extension-injected)
-	}
-	return result;
-}
-
-
-/**
- * Replace a DOM node with a freshly rendered vdom node, preserving the
- * parent relationship. Returns the new DOM node.
- */
-function _VirtualDom_redraw(domNode, vNode, eventNode)
+function _VirtualDom_redrawTNode(domNode, vNode, eventNode)
 {
 	var parentNode = domNode.parentNode;
-	var newNode = _VirtualDom_render(vNode, eventNode);
+	var newTNode = _VirtualDom_render(vNode, eventNode);
+	var newDomNode = _VirtualDom_tNodeDomNode(newTNode);
 
-	if (!_VirtualDom_eventNodes.has(newNode))
+	if (parentNode && newDomNode !== domNode)
 	{
-		var oldEventNode = _VirtualDom_eventNodes.get(domNode);
-		if (oldEventNode) { _VirtualDom_eventNodes.set(newNode, oldEventNode); }
+		parentNode.replaceChild(newDomNode, domNode);
 	}
-
-	if (parentNode && newNode !== domNode)
-	{
-		parentNode.replaceChild(newNode, domNode);
-	}
-	return newNode;
+	return newTNode;
 }
 
 
 /**
- * Combined diff+patch: walk old vdom, new vdom, and the live DOM tree
- * simultaneously, applying changes inline. Returns the (possibly replaced)
- * DOM node for this position.
+ * Public API for the combined diff+patch. Called by browser.js as:
+ *   domNode = _VirtualDom_update(domNode, currNode, nextNode, sendToApp);
  *
- * This eliminates the separate addDomNodes traversal and makes the
- * implementation resilient to browser-extension-injected DOM nodes.
+ * Looks up the tNode tree stored on the root DOM node, performs the combined
+ * diff+patch, stores the updated tNode tree, and returns the (possibly new)
+ * root DOM node.
  */
 function _VirtualDom_update(domNode, x, y, eventNode)
+{
+	var tNode = domNode.__canopyTree;
+
+	if (!tNode)
+	{
+		// First update — no tNode exists yet. Build from existing DOM.
+		tNode = _VirtualDom_buildTNode(domNode, x);
+	}
+
+	var newTNode = _VirtualDom_updateTNode(tNode, x, y, eventNode);
+	var newDomNode = _VirtualDom_tNodeDomNode(newTNode);
+	newDomNode.__canopyTree = newTNode;
+	return newDomNode;
+}
+
+
+/**
+ * Core recursive diff+patch. Takes the old tNode, old vnode, new vnode,
+ * and eventNode. Returns the updated tNode (which may be a completely new
+ * tNode if a redraw occurred).
+ */
+function _VirtualDom_updateTNode(tNode, x, y, eventNode)
 {
 	// Same reference — nothing to do
 	if (x === y)
 	{
-		return domNode;
+		return tNode;
 	}
 
 	var xType = x.$;
@@ -2287,13 +1637,14 @@ function _VirtualDom_update(domNode, x, y, eventNode)
 		}
 		else
 		{
-			return _VirtualDom_redraw(domNode, y, eventNode);
+			return _VirtualDom_redrawTNode(_VirtualDom_tNodeDomNode(tNode), y, eventNode);
 		}
 	}
 
 	switch (yType)
 	{
 		case __2_TEXT:
+			var domNode = tNode.__domNode;
 			if (x.__text !== y.__text)
 			{
 				// Detect translated text (browser/extension translation):
@@ -2304,7 +1655,7 @@ function _VirtualDom_update(domNode, x, y, eventNode)
 					domNode.replaceData(0, domNode.length, y.__text);
 				}
 			}
-			return domNode;
+			return tNode;
 
 		case __2_THUNK:
 			var xRefs = x.__refs;
@@ -2318,10 +1669,10 @@ function _VirtualDom_update(domNode, x, y, eventNode)
 			if (same)
 			{
 				y.__node = x.__node;
-				return domNode;
+				return tNode;
 			}
 			y.__node = y.__thunk();
-			return _VirtualDom_update(domNode, x.__node || (x.__node = x.__thunk()), y.__node, eventNode);
+			return _VirtualDom_updateTNode(tNode, x.__node || (x.__node = x.__thunk()), y.__node, eventNode);
 
 		case __2_TAGGER:
 			var xTaggers = x.__tagger;
@@ -2350,54 +1701,56 @@ function _VirtualDom_update(domNode, x, y, eventNode)
 
 			if (nesting && xTaggers.length !== yTaggers.length)
 			{
-				return _VirtualDom_redraw(domNode, y, eventNode);
+				return _VirtualDom_redrawTNode(_VirtualDom_tNodeDomNode(tNode), y, eventNode);
 			}
 
-			// Update tagger chain
+			// Build updated eventNode with new tagger wrapping
+			var subEventNode;
 			if (nesting ? !_VirtualDom_pairwiseRefEqual(xTaggers, yTaggers) : xTaggers !== yTaggers)
 			{
-				var existingEventNode = _VirtualDom_eventNodes.get(domNode);
-				if (existingEventNode)
-				{
-					existingEventNode.__tagger = yTaggers;
-				}
-				else
-				{
-					_VirtualDom_eventNodes.set(domNode, { __tagger: yTaggers, __parent: eventNode });
-				}
+				subEventNode = _VirtualDom_wrapEventNode(yTaggers, eventNode);
+			}
+			else
+			{
+				subEventNode = tNode.__eventNode || _VirtualDom_wrapEventNode(yTaggers, eventNode);
 			}
 
-			var subEventNode = _VirtualDom_eventNodes.get(domNode) || eventNode;
-			return _VirtualDom_update(domNode, xSubNode, ySubNode, subEventNode);
+			var childTNode = _VirtualDom_updateTNode(tNode.__child, xSubNode, ySubNode, subEventNode);
+			return { __tagger: yTaggers, __eventNode: subEventNode, __child: childTNode };
 
 		case __2_NODE:
+			var domNode = tNode.__domNode;
 			if (x.__tag !== y.__tag || x.__namespace !== y.__namespace)
 			{
-				return _VirtualDom_redraw(domNode, y, eventNode);
+				return _VirtualDom_redrawTNode(domNode, y, eventNode);
 			}
 
 			var factsDiff = _VirtualDom_diffFacts(x.__facts, y.__facts);
 			if (factsDiff) { _VirtualDom_applyFacts(domNode, eventNode, factsDiff); }
 
-			_VirtualDom_updateKids(domNode, x.__kids, y.__kids, eventNode);
-			return domNode;
+			var newKidTNodes = _VirtualDom_updateTNodeKids(domNode, tNode.__kids, x.__kids, y.__kids, eventNode);
+			tNode.__kids = newKidTNodes;
+			return tNode;
 
 		case __2_KEYED_NODE:
+			var domNode = tNode.__domNode;
 			if (x.__tag !== y.__tag || x.__namespace !== y.__namespace)
 			{
-				return _VirtualDom_redraw(domNode, y, eventNode);
+				return _VirtualDom_redrawTNode(domNode, y, eventNode);
 			}
 
 			var factsDiff = _VirtualDom_diffFacts(x.__facts, y.__facts);
 			if (factsDiff) { _VirtualDom_applyFacts(domNode, eventNode, factsDiff); }
 
-			_VirtualDom_updateKeyedKids(domNode, x.__kids, y.__kids, eventNode);
-			return domNode;
+			var newKidTNodes = _VirtualDom_updateTNodeKeyedKids(domNode, tNode.__kids, x.__kids, y.__kids, eventNode);
+			tNode.__kids = newKidTNodes;
+			return tNode;
 
 		case __2_CUSTOM:
+			var domNode = tNode.__domNode;
 			if (x.__render !== y.__render)
 			{
-				return _VirtualDom_redraw(domNode, y, eventNode);
+				return _VirtualDom_redrawTNode(domNode, y, eventNode);
 			}
 
 			var factsDiff = _VirtualDom_diffFacts(x.__facts, y.__facts);
@@ -2405,69 +1758,76 @@ function _VirtualDom_update(domNode, x, y, eventNode)
 
 			var patch = y.__diff(x.__model, y.__model);
 			if (patch) { patch(domNode); }
-			return domNode;
+			return tNode;
 	}
 
-	return domNode;
+	return tNode;
 }
 
 
 /**
- * Update non-keyed children inline. Matches DOM children to vdom children
- * using markers to skip extension-injected nodes.
+ * Update non-keyed children using tNode references. No DOM walking needed —
+ * child DOM nodes are stored in tNode.__kids[i].__domNode.
  */
-function _VirtualDom_updateKids(domNode, xKids, yKids, eventNode)
+function _VirtualDom_updateTNodeKids(domNode, kidTNodes, xKids, yKids, eventNode)
 {
 	var xLen = xKids.length;
 	var yLen = yKids.length;
 	var minLen = xLen < yLen ? xLen : yLen;
-
-	// Get our own DOM children (skip extension-injected)
-	var domKids = _VirtualDom_ownChildren(domNode);
+	var newKidTNodes = new Array(yLen);
 
 	// Update existing children pairwise
 	for (var i = 0; i < minLen; i++)
 	{
-		var newDom = _VirtualDom_update(domKids[i], xKids[i], yKids[i], eventNode);
-		if (newDom !== domKids[i])
-		{
-			domKids[i] = newDom;
-		}
+		var oldTNode = kidTNodes[i];
+		var newTNode = _VirtualDom_updateTNode(oldTNode, xKids[i], yKids[i], eventNode);
+		newKidTNodes[i] = newTNode;
 	}
 
-	// Remove excess old children
+	// Remove excess old children (reverse order to avoid index shifting)
 	for (var i = xLen - 1; i >= yLen; i--)
 	{
-		domNode.removeChild(domKids[i]);
+		var childDom = _VirtualDom_tNodeDomNode(kidTNodes[i]);
+		if (childDom.parentNode)
+		{
+			childDom.parentNode.removeChild(childDom);
+		}
 	}
 
 	// Append new children
 	for (var i = xLen; i < yLen; i++)
 	{
-		_VirtualDom_appendChild(domNode, _VirtualDom_render(yKids[i], eventNode));
+		var kidTNode = _VirtualDom_render(yKids[i], eventNode);
+		newKidTNodes[i] = kidTNode;
+		_VirtualDom_appendChild(domNode, _VirtualDom_tNodeDomNode(kidTNode));
 	}
+
+	return newKidTNodes;
 }
 
 
 /**
- * Update keyed children inline. Uses a map from key→{vnode, dom} to match
- * children efficiently, handling insertions, removals, and reorders.
+ * Update keyed children using tNode references. Uses a map from
+ * key → { vnode, tNode, used } for O(1) lookup. Handles insertions,
+ * removals, and reorders without walking the live DOM.
+ *
  * Prefers Element.prototype.moveBefore (Chrome 133+) for reordering when
  * available, falling back to insertBefore.
  */
-function _VirtualDom_updateKeyedKids(domNode, xKids, yKids, eventNode)
+function _VirtualDom_updateTNodeKeyedKids(domNode, kidTNodes, xKids, yKids, eventNode)
 {
-	var domKids = _VirtualDom_ownChildren(domNode);
-
-	// Build map: key → { vnode, dom, used }
+	// Build map: key → { vnode, tNode, used }
 	var oldMap = {};
 	for (var i = 0; i < xKids.length; i++)
 	{
-		oldMap[xKids[i].a] = { vnode: xKids[i].b, dom: domKids[i], used: false };
+		var xKey = xKids[i].a;
+		oldMap[xKey] = { vnode: xKids[i].b, tNode: kidTNodes[i], used: false };
 	}
 
-	// Build new DOM order
-	var newDomOrder = [];
+	// Build new tNode array and DOM order
+	var newKidTNodes = new Array(yKids.length);
+	var newDomOrder = new Array(yKids.length);
+
 	for (var i = 0; i < yKids.length; i++)
 	{
 		var key = yKids[i].a;
@@ -2477,14 +1837,17 @@ function _VirtualDom_updateKeyedKids(domNode, xKids, yKids, eventNode)
 		if (old)
 		{
 			// Update existing node
-			var newDom = _VirtualDom_update(old.dom, old.vnode, yKid, eventNode);
+			var newTNode = _VirtualDom_updateTNode(old.tNode, old.vnode, yKid, eventNode);
 			old.used = true;
-			newDomOrder.push(newDom);
+			newKidTNodes[i] = newTNode;
+			newDomOrder[i] = _VirtualDom_tNodeDomNode(newTNode);
 		}
 		else
 		{
 			// Create new node
-			newDomOrder.push(_VirtualDom_render(yKid, eventNode));
+			var newTNode = _VirtualDom_render(yKid, eventNode);
+			newKidTNodes[i] = newTNode;
+			newDomOrder[i] = _VirtualDom_tNodeDomNode(newTNode);
 		}
 	}
 
@@ -2493,7 +1856,11 @@ function _VirtualDom_updateKeyedKids(domNode, xKids, yKids, eventNode)
 	{
 		if (Object.prototype.hasOwnProperty.call(oldMap, key) && !oldMap[key].used)
 		{
-			domNode.removeChild(oldMap[key].dom);
+			var oldDom = _VirtualDom_tNodeDomNode(oldMap[key].tNode);
+			if (oldDom.parentNode)
+			{
+				oldDom.parentNode.removeChild(oldDom);
+			}
 		}
 	}
 
@@ -2502,7 +1869,6 @@ function _VirtualDom_updateKeyedKids(domNode, xKids, yKids, eventNode)
 	// preservation, fall back to insertBefore.
 	var _moveBefore = domNode.moveBefore ? domNode.moveBefore.bind(domNode) : null;
 
-	// Walk through the desired order, inserting/moving as needed
 	var domChildNodes = domNode.childNodes;
 	var cursor = 0;
 	for (var i = 0; i < newDomOrder.length; i++)
@@ -2525,7 +1891,7 @@ function _VirtualDom_updateKeyedKids(domNode, xKids, yKids, eventNode)
 		}
 		else if (desired.parentNode === domNode)
 		{
-			// Needs to move — use moveBefore if available
+			// Needs to move
 			if (_moveBefore)
 			{
 				_moveBefore(desired, domChildNodes[cursor] || null);
@@ -2543,24 +1909,8 @@ function _VirtualDom_updateKeyedKids(domNode, xKids, yKids, eventNode)
 			cursor++;
 		}
 	}
-}
 
-
-/**
- * Virtualize form control values. During _VirtualDom_diffFacts, compare
- * virtualized values from vdom instead of reading from DOM. This prevents
- * cursor jump bugs and input race conditions.
- */
-function _VirtualDom_virtualizeFormValue(domNode, key, vdomValue)
-{
-	// For value, checked, and selected: write to DOM only when the vdom
-	// value actually changed (as tracked in the facts diff). The existing
-	// _VirtualDom_applyFacts already handles the domNode[key] !== value
-	// guard, so form virtualization is handled by the existing code path.
-	// The key insight is that with combined diff+patch, we always compare
-	// old vdom → new vdom (never reading from DOM), so the value is
-	// authoritative from the application state.
-	domNode[key] = vdomValue;
+	return newKidTNodes;
 }
 
 
@@ -2576,25 +1926,33 @@ function _VirtualDom_virtualizeFormValue(domNode, key, vdomValue)
 
 /**
  * Hydrate a server-rendered DOM tree by walking vdom and existing DOM in
- * parallel. Attaches markers, event handlers, and builds the mapping needed
- * for subsequent updates.
+ * parallel. Attaches markers, event handlers, and builds the tNode tree
+ * needed for subsequent updates. Returns a tNode.
  *
  * @canopy-type DomNode -> Node msg -> (msg -> ()) -> DomNode
  * @name hydrate
  */
 function _VirtualDom_hydrate(domNode, vNode, eventNode)
 {
+	var tNode = _VirtualDom_hydrateHelp(domNode, vNode, eventNode);
+	var rootDom = _VirtualDom_tNodeDomNode(tNode);
+	rootDom.__canopyTree = tNode;
+	return rootDom;
+}
+
+
+function _VirtualDom_hydrateHelp(domNode, vNode, eventNode)
+{
 	var tag = vNode.$;
 
 	if (tag === __2_THUNK)
 	{
-		return _VirtualDom_hydrate(domNode, vNode.__node || (vNode.__node = vNode.__thunk()), eventNode);
+		return _VirtualDom_hydrateHelp(domNode, vNode.__node || (vNode.__node = vNode.__thunk()), eventNode);
 	}
 
 	if (tag === __2_TEXT)
 	{
-		// Text node — nothing to hydrate (no events on text)
-		return domNode;
+		return { __domNode: domNode };
 	}
 
 	if (tag === __2_TAGGER)
@@ -2610,16 +1968,16 @@ function _VirtualDom_hydrate(domNode, vNode, eventNode)
 			subNode = subNode.__node;
 		}
 
-		var subEventRoot = { __tagger: tagger, __parent: eventNode };
-		_VirtualDom_eventNodes.set(domNode, subEventRoot);
-		return _VirtualDom_hydrate(domNode, subNode, subEventRoot);
+		var subEventRoot = _VirtualDom_wrapEventNode(tagger, eventNode);
+		var childTNode = _VirtualDom_hydrateHelp(domNode, subNode, subEventRoot);
+		return { __tagger: tagger, __eventNode: subEventRoot, __child: childTNode };
 	}
 
 	if (tag === __2_CUSTOM)
 	{
 		if (domNode.setAttribute) { domNode.setAttribute(_VirtualDom_MARKER, _VirtualDom_nextMarkerId++); }
 		_VirtualDom_applyFacts(domNode, eventNode, vNode.__facts);
-		return domNode;
+		return { __domNode: domNode };
 	}
 
 	// NODE or KEYED_NODE
@@ -2640,13 +1998,14 @@ function _VirtualDom_hydrate(domNode, vNode, eventNode)
 
 	// Recurse into children
 	var kids = vNode.__kids;
-	var domKids = _VirtualDom_ownChildren(domNode);
+	var childNodes = domNode.childNodes;
 	var isKeyed = tag === __2_KEYED_NODE;
+	var tNodeKids = new Array(kids.length);
 
-	for (var i = 0; i < kids.length && i < domKids.length; i++)
+	for (var i = 0, j = 0; i < kids.length && j < childNodes.length; i++, j++)
 	{
-		_VirtualDom_hydrate(domKids[i], isKeyed ? kids[i].b : kids[i], eventNode);
+		tNodeKids[i] = _VirtualDom_hydrateHelp(childNodes[j], isKeyed ? kids[i].b : kids[i], eventNode);
 	}
 
-	return domNode;
+	return { __domNode: domNode, __kids: tNodeKids };
 }
