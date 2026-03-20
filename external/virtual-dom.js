@@ -597,21 +597,52 @@ function noInnerHtmlOrFormAction(key)
 }
 
 /**
- * Sanitize URI string values by stripping javascript: protocol URIs to
- * prevent XSS.
- * @canopy-type String -> String
- * @name noJavaScriptUri
- * @param {string} value - URI value to sanitize
- * @returns {string} Empty string if javascript: URI, otherwise unchanged
+ * List of URI protocols that can execute code or load arbitrary content,
+ * and must never appear in href/src/action attributes.
  */
-function noJavaScriptUri(value)
+var _VirtualDom_DANGEROUS_PROTOCOLS = ['javascript', 'data', 'vbscript', 'file'];
+
+/**
+ * Return true if the URI string uses a dangerous protocol.
+ * Uses the URL API for accurate parsing, falling back to the legacy regex
+ * for browsers where URL is unavailable.
+ * @param {string} value
+ * @returns {boolean}
+ */
+function _VirtualDom_isDangerousUri(value)
 {
-	return _VirtualDom_RE_js.test(value) ? '' : value;
+	if (typeof value !== 'string') return false;
+	try
+	{
+		var url = new URL(value, location.href);
+		// url.protocol includes the trailing colon, e.g. "javascript:"
+		var proto = url.protocol.slice(0, -1).toLowerCase();
+		return _VirtualDom_DANGEROUS_PROTOCOLS.indexOf(proto) >= 0;
+	}
+	catch (_)
+	{
+		// URL constructor throws for relative URLs without a base — treat as safe.
+		// Still guard against the classic tab-obfuscated javascript: pattern.
+		return _VirtualDom_RE_js.test(value);
+	}
 }
 
 /**
- * Sanitize URI string values by stripping both javascript: and data:text/html
+ * Sanitize URI string values by stripping javascript: and other dangerous
  * protocol URIs to prevent XSS.
+ * @canopy-type String -> String
+ * @name noJavaScriptUri
+ * @param {string} value - URI value to sanitize
+ * @returns {string} Empty string if dangerous URI, otherwise unchanged
+ */
+function noJavaScriptUri(value)
+{
+	return _VirtualDom_isDangerousUri(value) ? '' : value;
+}
+
+/**
+ * Sanitize URI string values by stripping javascript:, data:, vbscript:,
+ * and file: protocol URIs to prevent XSS.
  * @canopy-type String -> String
  * @name noJavaScriptOrHtmlUri
  * @param {string} value - URI value to sanitize
@@ -619,12 +650,12 @@ function noJavaScriptUri(value)
  */
 function noJavaScriptOrHtmlUri(value)
 {
-	return _VirtualDom_RE_js_html.test(value) ? '' : value;
+	return _VirtualDom_isDangerousUri(value) ? '' : value;
 }
 
 /**
- * Sanitize JSON-wrapped values that might contain javascript: or data:text/html
- * URIs. Unwraps the JSON value, checks the string, and re-wraps if dangerous.
+ * Sanitize JSON-wrapped values that might contain dangerous URIs.
+ * Unwraps the JSON value, checks the string, and re-wraps if dangerous.
  * @canopy-type Json.Decode.Value -> Json.Decode.Value
  * @name noJavaScriptOrHtmlJson
  * @param {*} value - Json-wrapped value to sanitize
@@ -632,7 +663,8 @@ function noJavaScriptOrHtmlUri(value)
  */
 function noJavaScriptOrHtmlJson(value)
 {
-	return (typeof _Json_unwrap(value) === 'string' && _VirtualDom_RE_js_html.test(_Json_unwrap(value)))
+	var str = _Json_unwrap(value);
+	return (typeof str === 'string' && _VirtualDom_isDangerousUri(str))
 		? _Json_wrap('') : value;
 }
 
@@ -1084,6 +1116,7 @@ try
 	window.addEventListener('t', null, Object.defineProperty({}, 'passive', {
 		get: function() { _VirtualDom_passiveSupported = true; }
 	}));
+	window.removeEventListener('t', null);
 }
 catch(e) {}
 
