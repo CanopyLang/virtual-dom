@@ -920,13 +920,24 @@ function _VirtualDom_render(vNode, eventNode)
 	_VirtualDom_applyFacts(domNode, eventNode, vNode.__facts);
 
 	var kids = vNode.__kids;
-	var tNodeKids = new Array(kids.length);
-	for (var i = 0; i < kids.length; i++)
+	// Fast path: single text-node child. Use textContent= instead of
+	// createTextNode + appendChild to halve the number of DOM API calls.
+	var tNodeKids;
+	if (tag === __2_NODE && kids.length === 1 && kids[0].$ === __2_TEXT)
 	{
-		var kidVNode = tag === __2_NODE ? kids[i] : kids[i].b;
-		var kidTNode = _VirtualDom_render(kidVNode, eventNode);
-		tNodeKids[i] = kidTNode;
-		_VirtualDom_appendChild(domNode, _VirtualDom_tNodeDomNode(kidTNode));
+		domNode.textContent = kids[0].__text;
+		tNodeKids = [{ __domNode: domNode.firstChild }];
+	}
+	else
+	{
+		tNodeKids = new Array(kids.length);
+		for (var i = 0; i < kids.length; i++)
+		{
+			var kidVNode = tag === __2_NODE ? kids[i] : kids[i].b;
+			var kidTNode = _VirtualDom_render(kidVNode, eventNode);
+			tNodeKids[i] = kidTNode;
+			_VirtualDom_appendChild(domNode, _VirtualDom_tNodeDomNode(kidTNode));
+		}
 	}
 
 	return { __domNode: domNode, __kids: tNodeKids };
@@ -1062,9 +1073,24 @@ function _VirtualDom_applyAttrs(domNode, attrs)
 	for (var key in attrs)
 	{
 		var value = attrs[key];
-		typeof value !== 'undefined'
-			? domNode.setAttribute(key, value)
-			: domNode.removeAttribute(key);
+		// Use IDL property for common attributes to avoid the overhead of
+		// setAttribute's generic attribute-set mechanism.
+		if (key === 'class')
+		{
+			if (typeof value !== 'undefined') { domNode.className = value; }
+			else { domNode.removeAttribute('class'); }
+		}
+		else if (key === 'id')
+		{
+			if (typeof value !== 'undefined') { domNode.id = value; }
+			else { domNode.removeAttribute('id'); }
+		}
+		else
+		{
+			typeof value !== 'undefined'
+				? domNode.setAttribute(key, value)
+				: domNode.removeAttribute(key);
+		}
 	}
 }
 
@@ -1845,6 +1871,15 @@ function _VirtualDom_updateTNodeKids(domNode, kidTNodes, xKids, yKids, eventNode
 {
 	var xLen = xKids.length;
 	var yLen = yKids.length;
+
+	// Fast path: clearing all children. A single textContent='' removes all
+	// child DOM nodes atomically — much faster than N individual removeChild calls.
+	if (yLen === 0)
+	{
+		domNode.textContent = '';
+		return [];
+	}
+
 	var newKidTNodes = new Array(yLen);
 
 	var minLen = xLen < yLen ? xLen : yLen;
@@ -1995,6 +2030,15 @@ function _VirtualDom_lisIndices(arr)
  */
 function _VirtualDom_updateTNodeKeyedKids(domNode, kidTNodes, xKids, yKids, eventNode)
 {
+	// Fast path: clearing all children (e.g. Clear button). A single
+	// textContent='' removes all child DOM nodes atomically — O(1) vs O(n)
+	// individual removeChild calls, and much faster for the browser.
+	if (yKids.length === 0)
+	{
+		domNode.textContent = '';
+		return [];
+	}
+
 	// Build map: key → { vnode, tNode, used } and orphan pool (unmatched old nodes)
 	// for recycling. Orphans are collected in xKids order (= prior DOM order) so
 	// that assigning them in-order to unmatched new positions requires no extra moves.
@@ -2076,28 +2120,36 @@ function _VirtualDom_updateTNodeKeyedKids(domNode, kidTNodes, xKids, yKids, even
 		}
 	}
 
+	// Fast path: no prior children (initial render or post-clear). All nodes are
+	// fresh — batch-insert via a single DocumentFragment to avoid N live-DOM
+	// mutations that would each invalidate browser layout.
+	if (kidTNodes.length === 0)
+	{
+		var frag = _VirtualDom_doc.createDocumentFragment();
+		for (var i = 0; i < newDomOrder.length; i++)
+		{
+			frag.appendChild(newDomOrder[i]);
+		}
+		domNode.appendChild(frag);
+		return newKidTNodes;
+	}
+
 	// Efficient O(n log n) DOM reordering using minimum-moves algorithm.
 	// Computes the LIS of current DOM positions in desired order and only
 	// moves elements NOT in the LIS, processing right-to-left so that
 	// anchor references remain valid throughout.
-	var _moveBeforeOp = domNode.moveBefore ? domNode.moveBefore.bind(domNode) : null;
-
-	// Snapshot current marker-element positions before any moves
-	var domElems = [];
-	for (var c = domNode.firstChild; c; c = c.nextSibling)
-	{
-		if (c.nodeType === 1 && c.hasAttribute(_VirtualDom_MARKER))
-		{
-			domElems.push(c);
-		}
-	}
+	//
+	// Build current-position map from prior tNodes — no DOM attribute scan or
+	// marker attributes needed. Maps each old DOM node to its prior list index
+	// so we can detect which elements are already in the correct relative order.
 	var nodeToIdx = new Map();
-	for (var i = 0; i < domElems.length; i++)
+	for (var i = 0; i < kidTNodes.length; i++)
 	{
-		nodeToIdx.set(domElems[i], i);
+		nodeToIdx.set(_VirtualDom_tNodeDomNode(kidTNodes[i]), i);
 	}
 
-	// Compute old indices for desired order (-1 for new/untracked elements)
+	// Compute old indices for desired order (-1 for freshly rendered nodes
+	// not yet in the DOM, e.g. the newly appended rows in an Append operation).
 	var oldIndices = new Array(newDomOrder.length);
 	for (var i = 0; i < newDomOrder.length; i++)
 	{
@@ -2105,22 +2157,38 @@ function _VirtualDom_updateTNodeKeyedKids(domNode, kidTNodes, xKids, yKids, even
 		oldIndices[i] = (idx !== undefined) ? idx : -1;
 	}
 
-	// Find which positions are already in relative order (LIS)
+	// Find which positions are already in relative order (LIS). Fresh nodes
+	// (value -1) are excluded from the LIS computation — they always need
+	// insertion since they are not yet in the DOM.
 	var lisSet = _VirtualDom_lisIndices(oldIndices);
 
-	// Move non-LIS elements right-to-left; each gets inserted before its successor
-	for (var i = newDomOrder.length - 1; i >= 0; i--)
+	// Insert fresh nodes and move non-LIS existing nodes, right-to-left so
+	// that anchor references remain valid. Consecutive fresh nodes are batched
+	// into a single DocumentFragment to avoid N live-DOM mutations for Append.
+	var _moveBeforeOp = domNode.moveBefore ? domNode.moveBefore.bind(domNode) : null;
+	var i = newDomOrder.length - 1;
+	while (i >= 0)
 	{
-		if (lisSet.has(i)) { continue; }
-		var el = newDomOrder[i];
-		var anchor = (i + 1 < newDomOrder.length) ? newDomOrder[i + 1] : null;
-		if (_moveBeforeOp)
+		if (lisSet.has(i)) { i--; continue; }
+		if (oldIndices[i] >= 0)
 		{
-			_moveBeforeOp(el, anchor);
+			// Existing node that is not in the LIS: move it with one live-DOM op.
+			var anchor = (i + 1 < newDomOrder.length) ? newDomOrder[i + 1] : null;
+			if (_moveBeforeOp) { _moveBeforeOp(newDomOrder[i], anchor); }
+			else { domNode.insertBefore(newDomOrder[i], anchor); }
+			i--;
 		}
 		else
 		{
-			domNode.insertBefore(el, anchor);
+			// Fresh node: scan left to collect all consecutive fresh nodes into a
+			// DocumentFragment, then insert the whole batch with one live-DOM op.
+			var j = i;
+			while (j > 0 && oldIndices[j - 1] < 0) { j--; }
+			var frag = _VirtualDom_doc.createDocumentFragment();
+			for (var k = j; k <= i; k++) { frag.appendChild(newDomOrder[k]); }
+			var anchor = (i + 1 < newDomOrder.length) ? newDomOrder[i + 1] : null;
+			domNode.insertBefore(frag, anchor);
+			i = j - 1;
 		}
 	}
 
