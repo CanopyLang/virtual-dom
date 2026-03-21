@@ -320,6 +320,51 @@ function _VirtualDom_forceThunk(vNode)
 }
 
 /**
+ * Walk a vNode tree applying only "live" properties (value, checked,
+ * selectedIndex) to the corresponding DOM nodes without triggering a full
+ * re-render. Used when a lazy thunk short-circuits on unchanged refs so that
+ * controlled inputs remain in sync with the current model even when the thunk
+ * is skipped.
+ * @param {Object} vNode - The virtual node to visit
+ * @param {Object} tNode - The corresponding tNode with __domNode
+ */
+function _VirtualDom_quickVisit(vNode, tNode)
+{
+	var tag = vNode.$;
+	if (tag === __2_THUNK)
+	{
+		vNode = _VirtualDom_forceThunk(vNode);
+		tag = vNode.$;
+	}
+	if (tag !== __2_NODE && tag !== __2_KEYED_NODE) { return; }
+
+	var domNode = tNode.__domNode;
+	var facts = vNode.__facts;
+	if (facts)
+	{
+		var props = facts[__4_PROPS];
+		if (props)
+		{
+			if ('value' in props) { domNode.value = props.value; }
+			if ('checked' in props) { domNode.checked = props.checked; }
+			if ('selectedIndex' in props) { domNode.selectedIndex = props.selectedIndex; }
+		}
+	}
+
+	var vKids = tag === __2_KEYED_NODE
+		? vNode.__kids.map(function(k) { return k.b; })
+		: vNode.__kids;
+	var tKids = tNode.__kids;
+	if (!vKids || !tKids) { return; }
+	var len = Math.min(vKids.length, tKids.length);
+	for (var i = 0; i < len; i++)
+	{
+		_VirtualDom_quickVisit(vKids[i], tKids[i]);
+	}
+}
+
+
+/**
  * Lazily evaluate a view function with one argument. The virtual DOM subtree
  * is only rebuilt when the argument changes (by reference equality).
  * @canopy-type (a -> Node msg) -> a -> Node msg
@@ -922,8 +967,13 @@ function _VirtualDom_render(vNode, eventNode)
 	var kids = vNode.__kids;
 	// Fast path: single text-node child. Use textContent= instead of
 	// createTextNode + appendChild to halve the number of DOM API calls.
+	// Skip if the existing text node was marked as translated — overwriting
+	// textContent would destroy the translation and re-create the child node,
+	// losing the __translated flag on any existing tNode.
 	var tNodeKids;
-	if (tag === __2_NODE && kids.length === 1 && kids[0].$ === __2_TEXT)
+	var existingFirstChild = domNode.firstChild;
+	if (tag === __2_NODE && kids.length === 1 && kids[0].$ === __2_TEXT
+		&& !(existingFirstChild && existingFirstChild.__translated))
 	{
 		domNode.textContent = kids[0].__text;
 		tNodeKids = [{ __domNode: domNode.firstChild }];
@@ -1754,10 +1804,15 @@ function _VirtualDom_updateTNode(tNode, x, y, eventNode)
 			{
 				// Detect translated text (browser/extension translation):
 				// if DOM text doesn't match old vdom, a translator changed it.
-				// We preserve the translation by not updating.
+				// We preserve the translation by not updating, and mark the
+				// tNode so the fast-path render won't clobber it with textContent=.
 				if (domNode.nodeType === 3 && domNode.data === x.__text)
 				{
 					domNode.replaceData(0, domNode.length, y.__text);
+				}
+				else
+				{
+					domNode.__translated = true;
 				}
 			}
 			return tNode;
@@ -1774,6 +1829,11 @@ function _VirtualDom_updateTNode(tNode, x, y, eventNode)
 			if (same)
 			{
 				y.__node = x.__node;
+				// Even when the thunk is unchanged, the DOM may contain a
+				// controlled input whose value was mutated by the user. Sync
+				// live props (value, checked, selectedIndex) without a full
+				// re-render so the model stays authoritative.
+				_VirtualDom_quickVisit(y, tNode);
 				return tNode;
 			}
 			return _VirtualDom_updateTNode(tNode, _VirtualDom_forceThunk(x), _VirtualDom_forceThunk(y), eventNode);

@@ -28,6 +28,8 @@ main =
         , mapAttributeTests
         , xssSanitizationTests
         , lazyTests
+        , translationRegressionTests
+        , lazyInputRegressionTests
         , toHandlerIntTests
         ]
 
@@ -600,6 +602,99 @@ lazyTests =
                 |> Expect.equal True
         , test "lazy8 produces a node when forced" <| \_ ->
             TestHelper.isElementNode (VirtualDom.lazy8 (\_ _ _ _ _ _ _ _ -> VirtualDom.node "div" [] []) () () () () () () () ())
+                |> Expect.equal True
+        ]
+
+
+
+-- TRANSLATION REGRESSION TESTS
+--
+-- These tests verify the structural invariants that the translation-detection
+-- code in _VirtualDom_updateTNode relies on. The actual DOM-preservation
+-- behavior (preserving browser-translated text) requires a live browser and
+-- cannot be verified in a pure structural test runner.
+--
+-- What the translation fix does: when `domNode.data !== x.__text` after a
+-- text diff, the code sets `domNode.__translated = true` instead of
+-- clobbering the translated content. The fast-path in _VirtualDom_render
+-- skips `textContent =` when the existing child has `__translated = true`.
+
+
+translationRegressionTests : Test
+translationRegressionTests =
+    describe "Translation regression"
+        [ test "text node captures its content in __text (used by translation detector)" <| \_ ->
+            TestHelper.getText (VirtualDom.text "Hello, world!")
+                |> Expect.equal (Just "Hello, world!")
+        , test "empty text node has empty content" <| \_ ->
+            TestHelper.getText (VirtualDom.text "")
+                |> Expect.equal (Just "")
+        , test "text node content is distinct from a different text node" <| \_ ->
+            Expect.notEqual
+                (TestHelper.getText (VirtualDom.text "before"))
+                (TestHelper.getText (VirtualDom.text "after"))
+        , test "text with unicode is preserved exactly" <| \_ ->
+            TestHelper.getText (VirtualDom.text "Héllo wörld 🌍")
+                |> Expect.equal (Just "Héllo wörld 🌍")
+        ]
+
+
+
+-- LAZY + CONTROLLED INPUT REGRESSION TESTS
+--
+-- These tests verify the structural invariants needed by _VirtualDom_quickVisit,
+-- which is called when a lazy thunk short-circuits (refs unchanged). quickVisit
+-- walks the forced vNode tree and applies live props (value, checked,
+-- selectedIndex) to keep controlled inputs in sync with the model when the
+-- lazy optimization skips a full re-render.
+
+
+lazyInputRegressionTests : Test
+lazyInputRegressionTests =
+    describe "Lazy controlled input regression"
+        [ test "lazy node with value property forces to an input element" <| \_ ->
+            TestHelper.getTag
+                (VirtualDom.lazy
+                    (\val ->
+                        VirtualDom.node "input"
+                            [ VirtualDom.property "value" (Encode.string val) ]
+                            []
+                    )
+                    "hello"
+                )
+                |> Expect.equal (Just "input")
+        , test "lazy2 node with value property forces to an input element" <| \_ ->
+            TestHelper.getTag
+                (VirtualDom.lazy2
+                    (\val _ ->
+                        VirtualDom.node "input"
+                            [ VirtualDom.property "value" (Encode.string val) ]
+                            []
+                    )
+                    "world"
+                    ()
+                )
+                |> Expect.equal (Just "input")
+        , test "lazy node with checked property forces to an input element" <| \_ ->
+            TestHelper.getTag
+                (VirtualDom.lazy
+                    (\checked ->
+                        VirtualDom.node "input"
+                            [ VirtualDom.property "checked" (Encode.bool checked) ]
+                            []
+                    )
+                    True
+                )
+                |> Expect.equal (Just "input")
+        , test "lazy wrapping a keyed node forces to a keyed node" <| \_ ->
+            TestHelper.isKeyedNode
+                (VirtualDom.lazy
+                    (\_ ->
+                        VirtualDom.keyedNode "ul" []
+                            [ ( "a", VirtualDom.node "li" [] [ VirtualDom.text "item" ] ) ]
+                    )
+                    ()
+                )
                 |> Expect.equal True
         ]
 
