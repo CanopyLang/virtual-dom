@@ -1077,7 +1077,13 @@ function _VirtualDom_applyAttrs(domNode, attrs)
 		// setAttribute's generic attribute-set mechanism.
 		if (key === 'class')
 		{
-			if (typeof value !== 'undefined') { domNode.className = value; }
+			// Skip the assignment entirely when both old and new are empty to
+			// avoid the setAttribute overhead on freshly-created elements where
+			// className is already "" (e.g. every non-selected row on Create).
+			if (typeof value !== 'undefined')
+			{
+				if (value || domNode.className) { domNode.className = value; }
+			}
 			else { domNode.removeAttribute('class'); }
 		}
 		else if (key === 'id')
@@ -1872,17 +1878,58 @@ function _VirtualDom_updateTNodeKids(domNode, kidTNodes, xKids, yKids, eventNode
 	var xLen = xKids.length;
 	var yLen = yKids.length;
 
-	// Fast path: clearing all children. A single textContent='' removes all
-	// child DOM nodes atomically — much faster than N individual removeChild calls.
-	if (yLen === 0)
-	{
-		domNode.textContent = '';
-		return [];
-	}
-
 	var newKidTNodes = new Array(yLen);
 
+	// Fast path: clear all children (e.g. Clear button → 0 rows).
+	// Avoids 1000 _VirtualDom_tNodeDomNode calls and parentNode checks by
+	// using the browser-optimised lastChild removal loop instead.
+	if (yLen === 0)
+	{
+		while (domNode.lastChild) { domNode.removeChild(domNode.lastChild); }
+		return newKidTNodes;
+	}
+
 	var minLen = xLen < yLen ? xLen : yLen;
+
+	// Bulk-replacement fast path.
+	// When both sides have the same count and all kids are thunks, sample the
+	// first few pairs. If all sampled pairs have different thunk refs the list
+	// is being fully replaced (e.g. Replace / second Create) and a clear+create
+	// cycle is cheaper than 1000 pairwise sub-tree diffs that each force two
+	// VDOM trees and recurse through 9 nodes.
+	//
+	// The heuristic aborts as soon as one same-ref pair is found, so operations
+	// that only touch a handful of rows (Update every-10th, Select, Swap) fall
+	// through to the normal pairwise path unchanged. The output is always correct
+	// even if a few un-sampled rows happen to be identical — we just recreate
+	// them unnecessarily.
+	var _BULK_REPLACE_SAMPLE = 5;
+	if (xLen >= _BULK_REPLACE_SAMPLE && xLen === yLen
+		&& xKids[0].$ === __2_THUNK && yKids[0].$ === __2_THUNK)
+	{
+		var _allDiff = true;
+		for (var _s = 0; _s < _BULK_REPLACE_SAMPLE; _s++)
+		{
+			if (_VirtualDom_sameThunkRefs(xKids[_s], yKids[_s]))
+			{
+				_allDiff = false;
+				break;
+			}
+		}
+		if (_allDiff)
+		{
+			while (domNode.lastChild) { domNode.removeChild(domNode.lastChild); }
+			var frag = _VirtualDom_doc.createDocumentFragment();
+			for (var i = 0; i < yLen; i++)
+			{
+				var kidTNode = _VirtualDom_render(yKids[i], eventNode);
+				newKidTNodes[i] = kidTNode;
+				frag.appendChild(_VirtualDom_tNodeDomNode(kidTNode));
+			}
+			domNode.appendChild(frag);
+			return newKidTNodes;
+		}
+	}
 
 	// Fast path for single-element removal. When exactly one child is removed:
 	// scan forward to find the removal position k (first thunk-ref mismatch),
@@ -1931,14 +1978,12 @@ function _VirtualDom_updateTNodeKids(domNode, kidTNodes, xKids, yKids, eventNode
 		newKidTNodes[i] = newTNode;
 	}
 
-	// Remove excess old children (reverse order to avoid index shifting)
+	// Remove excess old children (reverse order to avoid index shifting).
+	// All kidTNodes are direct children of domNode, so removeChild is safe
+	// without a parentNode check.
 	for (var i = xLen - 1; i >= yLen; i--)
 	{
-		var childDom = _VirtualDom_tNodeDomNode(kidTNodes[i]);
-		if (childDom.parentNode)
-		{
-			childDom.parentNode.removeChild(childDom);
-		}
+		domNode.removeChild(_VirtualDom_tNodeDomNode(kidTNodes[i]));
 	}
 
 	// Append new children via DocumentFragment to batch all DOM inserts into
@@ -2030,15 +2075,6 @@ function _VirtualDom_lisIndices(arr)
  */
 function _VirtualDom_updateTNodeKeyedKids(domNode, kidTNodes, xKids, yKids, eventNode)
 {
-	// Fast path: clearing all children (e.g. Clear button). A single
-	// textContent='' removes all child DOM nodes atomically — O(1) vs O(n)
-	// individual removeChild calls, and much faster for the browser.
-	if (yKids.length === 0)
-	{
-		domNode.textContent = '';
-		return [];
-	}
-
 	// Build map: key → { vnode, tNode, used } and orphan pool (unmatched old nodes)
 	// for recycling. Orphans are collected in xKids order (= prior DOM order) so
 	// that assigning them in-order to unmatched new positions requires no extra moves.
