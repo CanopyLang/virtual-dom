@@ -25,6 +25,13 @@ var _VirtualDom_doc = typeof document !== 'undefined' ? document : {};
 var _VirtualDom_nextMarkerId = 0;
 var _VirtualDom_MARKER = 'data-canopy';
 
+// Controls whether data-canopy markers are stamped during _VirtualDom_render.
+// Markers are only needed by the debugger (virtualize) and SSR hydration.
+// They are false by default so normal rendering (Browser.sandbox/application
+// without SSR) skips ~8000+ setAttribute calls per 1000-row Create.
+// Set to true before calling _VirtualDom_hydrate for SSR scenarios.
+var _VirtualDom_stampMarkers = false;
+
 var _VirtualDom_JSON_SUCCEED = 0;
 
 var __2_TEXT = 0;
@@ -263,8 +270,13 @@ var map = F2(function(tagger, node)
  * equality checking and a deferred computation. During diffing, if all
  * refs are referentially equal to the previous render, the subtree is
  * skipped entirely.
+ *
+ * When thunk is null, the computation is derived directly from refs:
+ * refs[0] is the view function and refs[1..n] are its arguments. This
+ * avoids allocating a separate closure object per lazy call.
+ *
  * @param {Array} refs - Reference values for equality checking
- * @param {Function} thunk - Deferred computation producing a virtual node
+ * @param {Function|null} thunk - Deferred computation, or null to derive from refs
  * @returns {Object} A thunk virtual node
  */
 function _VirtualDom_thunk(refs, thunk)
@@ -278,6 +290,36 @@ function _VirtualDom_thunk(refs, thunk)
 }
 
 /**
+ * Force a thunk node to produce its virtual DOM node, caching the result.
+ * Supports both closure-based thunks (__thunk !== null) and refs-based
+ * thunks (__thunk === null) where refs[0] is the function and refs[1..n]
+ * are its arguments.
+ */
+function _VirtualDom_forceThunk(vNode)
+{
+	if (vNode.__node) { return vNode.__node; }
+	var thunkFn = vNode.__thunk;
+	if (thunkFn)
+	{
+		vNode.__node = thunkFn();
+		return vNode.__node;
+	}
+	var refs = vNode.__refs;
+	var fn = refs[0];
+	switch (refs.length)
+	{
+		case 2: vNode.__node = fn(refs[1]); break;
+		case 3: vNode.__node = A2(fn, refs[1], refs[2]); break;
+		case 4: vNode.__node = A3(fn, refs[1], refs[2], refs[3]); break;
+		case 5: vNode.__node = A4(fn, refs[1], refs[2], refs[3], refs[4]); break;
+		default:
+			var args = refs.slice(1);
+			vNode.__node = fn.apply(null, args);
+	}
+	return vNode.__node;
+}
+
+/**
  * Lazily evaluate a view function with one argument. The virtual DOM subtree
  * is only rebuilt when the argument changes (by reference equality).
  * @canopy-type (a -> Node msg) -> a -> Node msg
@@ -288,9 +330,7 @@ function _VirtualDom_thunk(refs, thunk)
  */
 var lazy = F2(function(func, a)
 {
-	return _VirtualDom_thunk([func, a], function() {
-		return func(a);
-	});
+	return _VirtualDom_thunk([func, a], null);
 });
 
 /**
@@ -305,9 +345,7 @@ var lazy = F2(function(func, a)
  */
 var lazy2 = F3(function(func, a, b)
 {
-	return _VirtualDom_thunk([func, a, b], function() {
-		return A2(func, a, b);
-	});
+	return _VirtualDom_thunk([func, a, b], null);
 });
 
 /**
@@ -323,9 +361,7 @@ var lazy2 = F3(function(func, a, b)
  */
 var lazy3 = F4(function(func, a, b, c)
 {
-	return _VirtualDom_thunk([func, a, b, c], function() {
-		return A3(func, a, b, c);
-	});
+	return _VirtualDom_thunk([func, a, b, c], null);
 });
 
 /**
@@ -342,9 +378,7 @@ var lazy3 = F4(function(func, a, b, c)
  */
 var lazy4 = F5(function(func, a, b, c, d)
 {
-	return _VirtualDom_thunk([func, a, b, c, d], function() {
-		return A4(func, a, b, c, d);
-	});
+	return _VirtualDom_thunk([func, a, b, c, d], null);
 });
 
 /**
@@ -362,9 +396,7 @@ var lazy4 = F5(function(func, a, b, c, d)
  */
 var lazy5 = F6(function(func, a, b, c, d, e)
 {
-	return _VirtualDom_thunk([func, a, b, c, d, e], function() {
-		return A5(func, a, b, c, d, e);
-	});
+	return _VirtualDom_thunk([func, a, b, c, d, e], null);
 });
 
 /**
@@ -383,9 +415,7 @@ var lazy5 = F6(function(func, a, b, c, d, e)
  */
 var lazy6 = F7(function(func, a, b, c, d, e, f)
 {
-	return _VirtualDom_thunk([func, a, b, c, d, e, f], function() {
-		return A6(func, a, b, c, d, e, f);
-	});
+	return _VirtualDom_thunk([func, a, b, c, d, e, f], null);
 });
 
 /**
@@ -405,9 +435,7 @@ var lazy6 = F7(function(func, a, b, c, d, e, f)
  */
 var lazy7 = F8(function(func, a, b, c, d, e, f, g)
 {
-	return _VirtualDom_thunk([func, a, b, c, d, e, f, g], function() {
-		return A7(func, a, b, c, d, e, f, g);
-	});
+	return _VirtualDom_thunk([func, a, b, c, d, e, f, g], null);
 });
 
 /**
@@ -428,9 +456,7 @@ var lazy7 = F8(function(func, a, b, c, d, e, f, g)
  */
 var lazy8 = F9(function(func, a, b, c, d, e, f, g, h)
 {
-	return _VirtualDom_thunk([func, a, b, c, d, e, f, g, h], function() {
-		return A8(func, a, b, c, d, e, f, g, h);
-	});
+	return _VirtualDom_thunk([func, a, b, c, d, e, f, g, h], null);
 });
 
 
@@ -835,7 +861,7 @@ function _VirtualDom_render(vNode, eventNode)
 
 	if (tag === __2_THUNK)
 	{
-		return _VirtualDom_render(vNode.__node || (vNode.__node = vNode.__thunk()), eventNode);
+		return _VirtualDom_render(_VirtualDom_forceThunk(vNode), eventNode);
 	}
 
 	if (tag === __2_TEXT)
@@ -877,8 +903,13 @@ function _VirtualDom_render(vNode, eventNode)
 		? _VirtualDom_doc.createElementNS(vNode.__namespace, vNode.__tag)
 		: _VirtualDom_doc.createElement(vNode.__tag);
 
-	// Stamp marker for extension-safe DOM identification
-	domNode.setAttribute(_VirtualDom_MARKER, _VirtualDom_nextMarkerId++);
+	// Stamp marker for extension-safe DOM identification. Skipped in normal
+	// rendering (sandbox/application without SSR) to avoid ~8000 setAttribute
+	// calls per 1000-row Create. Enabled by _VirtualDom_stampMarkers for SSR.
+	if (_VirtualDom_stampMarkers)
+	{
+		domNode.setAttribute(_VirtualDom_MARKER, _VirtualDom_nextMarkerId++);
+	}
 
 	var _divertHref = _VirtualDom_divertHrefToApp_current();
 	if (_divertHref && vNode.__tag == 'a')
@@ -963,23 +994,29 @@ function _VirtualDom_renderDomNode(vNode, eventNode)
 
 function _VirtualDom_applyFacts(domNode, eventNode, facts)
 {
+	// Direct property access for the four known sub-object fact types is faster
+	// than a for...in loop when every element has exactly one fact (the benchmark
+	// common case). The for...in at the end handles plain props (rare).
+
+	var styles = facts['a__1_STYLE'];
+	if (styles) { _VirtualDom_applyStyles(domNode, styles); }
+
+	var events = facts['a__1_EVENT'];
+	if (events) { _VirtualDom_applyEvents(domNode, eventNode, events); }
+
+	var attrs = facts['a__1_ATTR'];
+	if (attrs) { _VirtualDom_applyAttrs(domNode, attrs); }
+
+	var attrsNS = facts['a__1_ATTR_NS'];
+	if (attrsNS) { _VirtualDom_applyAttrsNS(domNode, attrsNS); }
+
 	for (var key in facts)
 	{
-		if (!Object.prototype.hasOwnProperty.call(facts, key)) continue;
+		switch (key)
+		{
+			case 'a__1_STYLE': case 'a__1_EVENT': case 'a__1_ATTR': case 'a__1_ATTR_NS': continue;
+		}
 		var value = facts[key];
-
-		key === 'a__1_STYLE'
-			? _VirtualDom_applyStyles(domNode, value)
-			:
-		key === 'a__1_EVENT'
-			? _VirtualDom_applyEvents(domNode, eventNode, value)
-			:
-		key === 'a__1_ATTR'
-			? _VirtualDom_applyAttrs(domNode, value)
-			:
-		key === 'a__1_ATTR_NS'
-			? _VirtualDom_applyAttrsNS(domNode, value)
-			:
 		!_VirtualDom_dangerousProperty(key)
 			&& ((key !== 'value' && key !== 'checked') || domNode[key] !== value)
 			&& (domNode[key] = value);
@@ -999,7 +1036,6 @@ function _VirtualDom_applyStyles(domNode, styles)
 
 	for (var key in styles)
 	{
-		if (!Object.prototype.hasOwnProperty.call(styles, key)) continue;
 		var value = styles[key];
 		if (key.indexOf('--') === 0)
 		{
@@ -1025,7 +1061,6 @@ function _VirtualDom_applyAttrs(domNode, attrs)
 {
 	for (var key in attrs)
 	{
-		if (!Object.prototype.hasOwnProperty.call(attrs, key)) continue;
 		var value = attrs[key];
 		typeof value !== 'undefined'
 			? domNode.setAttribute(key, value)
@@ -1044,7 +1079,6 @@ function _VirtualDom_applyAttrsNS(domNode, nsAttrs)
 {
 	for (var key in nsAttrs)
 	{
-		if (!Object.prototype.hasOwnProperty.call(nsAttrs, key)) continue;
 		var pair = nsAttrs[key];
 		var namespace = pair.__namespace;
 		var value = pair.__value;
@@ -1068,7 +1102,6 @@ function _VirtualDom_applyEvents(domNode, eventNode, events)
 
 	for (var key in events)
 	{
-		if (!Object.prototype.hasOwnProperty.call(events, key)) continue;
 		var newHandler = events[key];
 		var oldCallback = allCallbacks[key];
 
@@ -1096,7 +1129,9 @@ function _VirtualDom_applyEvents(domNode, eventNode, events)
 		oldCallback = _VirtualDom_makeCallback(eventNode, newHandler);
 		domNode.addEventListener(key, oldCallback,
 			_VirtualDom_passiveSupported
-			&& { passive: _VirtualDom_toHandlerInt(newHandler) < 2 }
+			&& (_VirtualDom_toHandlerInt(newHandler) < 2
+				? _VirtualDom_passiveTrue
+				: _VirtualDom_passiveFalse)
 		);
 		allCallbacks[key] = oldCallback;
 	}
@@ -1119,6 +1154,11 @@ try
 	window.removeEventListener('t', null);
 }
 catch(e) {}
+
+// Pre-allocated passive options objects to avoid per-addEventListener allocations.
+// Created lazily after _VirtualDom_passiveSupported is known.
+var _VirtualDom_passiveTrue = { passive: true };
+var _VirtualDom_passiveFalse = { passive: false };
 
 
 
@@ -1463,7 +1503,7 @@ function _VirtualDom_buildTNode(domNode, vNode)
 
 	if (tag === __2_THUNK)
 	{
-		return _VirtualDom_buildTNode(domNode, vNode.__node || (vNode.__node = vNode.__thunk()));
+		return _VirtualDom_buildTNode(domNode, _VirtualDom_forceThunk(vNode));
 	}
 
 	if (tag === __2_TEXT)
@@ -1704,8 +1744,7 @@ function _VirtualDom_updateTNode(tNode, x, y, eventNode)
 				y.__node = x.__node;
 				return tNode;
 			}
-			y.__node = y.__thunk();
-			return _VirtualDom_updateTNode(tNode, x.__node || (x.__node = x.__thunk()), y.__node, eventNode);
+			return _VirtualDom_updateTNode(tNode, _VirtualDom_forceThunk(x), _VirtualDom_forceThunk(y), eventNode);
 
 		case __2_TAGGER:
 			var xTaggers = x.__tagger;
@@ -1806,8 +1845,48 @@ function _VirtualDom_updateTNodeKids(domNode, kidTNodes, xKids, yKids, eventNode
 {
 	var xLen = xKids.length;
 	var yLen = yKids.length;
-	var minLen = xLen < yLen ? xLen : yLen;
 	var newKidTNodes = new Array(yLen);
+
+	var minLen = xLen < yLen ? xLen : yLen;
+
+	// Fast path for single-element removal. When exactly one child is removed:
+	// scan forward to find the removal position k (first thunk-ref mismatch),
+	// verify the tail matches shifted by 1, then remove one DOM node instead
+	// of patching O(n) rows in place.
+	if (xLen === yLen + 1)
+	{
+		var k = yLen; // default: last element removed
+		for (var i = 0; i < yLen; i++)
+		{
+			if (!_VirtualDom_sameThunkRefs(xKids[i], yKids[i]))
+			{
+				k = i;
+				break;
+			}
+		}
+
+		var isRemoval = true;
+		for (var i = k; i < yLen; i++)
+		{
+			if (!_VirtualDom_sameThunkRefs(xKids[i + 1], yKids[i]))
+			{
+				isRemoval = false;
+				break;
+			}
+		}
+
+		if (isRemoval)
+		{
+			var removedDom = _VirtualDom_tNodeDomNode(kidTNodes[k]);
+			if (removedDom.parentNode)
+			{
+				removedDom.parentNode.removeChild(removedDom);
+			}
+			for (var i = 0; i < k; i++) { newKidTNodes[i] = kidTNodes[i]; }
+			for (var i = k; i < yLen; i++) { newKidTNodes[i] = kidTNodes[i + 1]; }
+			return newKidTNodes;
+		}
+	}
 
 	// Update existing children pairwise
 	for (var i = 0; i < minLen; i++)
@@ -1827,15 +1906,82 @@ function _VirtualDom_updateTNodeKids(domNode, kidTNodes, xKids, yKids, eventNode
 		}
 	}
 
-	// Append new children
-	for (var i = xLen; i < yLen; i++)
+	// Append new children via DocumentFragment to batch all DOM inserts into
+	// a single reflow-triggering operation instead of N separate appends.
+	if (xLen < yLen)
 	{
-		var kidTNode = _VirtualDom_render(yKids[i], eventNode);
-		newKidTNodes[i] = kidTNode;
-		_VirtualDom_appendChild(domNode, _VirtualDom_tNodeDomNode(kidTNode));
+		var frag = _VirtualDom_doc.createDocumentFragment();
+		for (var i = xLen; i < yLen; i++)
+		{
+			var kidTNode = _VirtualDom_render(yKids[i], eventNode);
+			newKidTNodes[i] = kidTNode;
+			frag.appendChild(_VirtualDom_tNodeDomNode(kidTNode));
+		}
+		domNode.appendChild(frag);
 	}
 
 	return newKidTNodes;
+}
+
+
+/**
+ * Returns true if x and y are the same virtual node for purposes of lazy
+ * memoization: either the same object reference, or both are thunks whose
+ * refs arrays are pairwise identical. Used to detect structural identity
+ * without forcing thunks.
+ */
+function _VirtualDom_sameThunkRefs(x, y)
+{
+	if (x === y) { return true; }
+	if (x.$ !== __2_THUNK || y.$ !== __2_THUNK) { return false; }
+	var xRefs = x.__refs;
+	var yRefs = y.__refs;
+	var n = xRefs.length;
+	if (n !== yRefs.length) { return false; }
+	for (var i = 0; i < n; i++)
+	{
+		if (xRefs[i] !== yRefs[i]) { return false; }
+	}
+	return true;
+}
+
+
+/**
+ * Compute the set of indices in `arr` that form the Longest Increasing
+ * Subsequence (LIS). Elements with value -1 (new nodes with no prior position)
+ * are excluded. Returns a Set of positions in `arr` whose values are part of
+ * the LIS — these elements are already in relative order and need not move.
+ *
+ * O(n log n) time, O(n) space. Uses patience-sort tails + parent backtracking.
+ */
+function _VirtualDom_lisIndices(arr)
+{
+	var n = arr.length;
+	var tails = [];
+	var tailIndices = [];
+	var parent = new Int32Array(n).fill(-1);
+	for (var i = 0; i < n; i++)
+	{
+		var val = arr[i];
+		if (val < 0) { continue; }
+		var lo = 0, hi = tails.length;
+		while (lo < hi)
+		{
+			var mid = (lo + hi) >>> 1;
+			tails[mid] < val ? (lo = mid + 1) : (hi = mid);
+		}
+		tails[lo] = val;
+		tailIndices[lo] = i;
+		parent[i] = lo > 0 ? tailIndices[lo - 1] : -1;
+	}
+	var result = new Set();
+	var idx = tailIndices.length > 0 ? tailIndices[tailIndices.length - 1] : -1;
+	while (idx >= 0)
+	{
+		result.add(idx);
+		idx = parent[idx];
+	}
+	return result;
 }
 
 
@@ -1849,7 +1995,9 @@ function _VirtualDom_updateTNodeKids(domNode, kidTNodes, xKids, yKids, eventNode
  */
 function _VirtualDom_updateTNodeKeyedKids(domNode, kidTNodes, xKids, yKids, eventNode)
 {
-	// Build map: key → { vnode, tNode, used }
+	// Build map: key → { vnode, tNode, used } and orphan pool (unmatched old nodes)
+	// for recycling. Orphans are collected in xKids order (= prior DOM order) so
+	// that assigning them in-order to unmatched new positions requires no extra moves.
 	var oldMap = {};
 	for (var i = 0; i < xKids.length; i++)
 	{
@@ -1857,89 +2005,122 @@ function _VirtualDom_updateTNodeKeyedKids(domNode, kidTNodes, xKids, yKids, even
 		oldMap[xKey] = { vnode: xKids[i].b, tNode: kidTNodes[i], used: false };
 	}
 
-	// Build new tNode array and DOM order
+	// Build new tNode array and DOM order.
+	// Two passes: first match existing keys, then assign orphans to unmatched
+	// positions rather than creating fresh DOM nodes. This avoids the costly
+	// remove+create cycle on operations like Replace where all keys change.
 	var newKidTNodes = new Array(yKids.length);
 	var newDomOrder = new Array(yKids.length);
+	var unmatchedPositions = [];
 
 	for (var i = 0; i < yKids.length; i++)
 	{
-		var key = yKids[i].a;
-		var yKid = yKids[i].b;
-		var old = oldMap[key];
-
+		var old = oldMap[yKids[i].a];
 		if (old)
 		{
-			// Update existing node
-			var newTNode = _VirtualDom_updateTNode(old.tNode, old.vnode, yKid, eventNode);
+			var newTNode = _VirtualDom_updateTNode(old.tNode, old.vnode, yKids[i].b, eventNode);
 			old.used = true;
 			newKidTNodes[i] = newTNode;
 			newDomOrder[i] = _VirtualDom_tNodeDomNode(newTNode);
 		}
 		else
 		{
-			// Create new node
-			var newTNode = _VirtualDom_render(yKid, eventNode);
-			newKidTNodes[i] = newTNode;
-			newDomOrder[i] = _VirtualDom_tNodeDomNode(newTNode);
+			unmatchedPositions.push(i);
 		}
 	}
 
-	// Remove unused old nodes
-	for (var key in oldMap)
+	// Collect unused old entries in xKids (= prior DOM) order for recycling
+	var orphanPool = [];
+	for (var i = 0; i < xKids.length; i++)
 	{
-		if (Object.prototype.hasOwnProperty.call(oldMap, key) && !oldMap[key].used)
+		var entry = oldMap[xKids[i].a];
+		if (!entry.used)
 		{
-			var oldDom = _VirtualDom_tNodeDomNode(oldMap[key].tNode);
-			if (oldDom.parentNode)
-			{
-				oldDom.parentNode.removeChild(oldDom);
-			}
+			orphanPool.push(entry);
 		}
 	}
 
-	// Reorder DOM children to match newDomOrder.
-	// Use moveBefore (Chrome 133+) when available for better animation
-	// preservation, fall back to insertBefore.
-	var _moveBefore = domNode.moveBefore ? domNode.moveBefore.bind(domNode) : null;
-
-	var domChildNodes = domNode.childNodes;
-	var cursor = 0;
-	for (var i = 0; i < newDomOrder.length; i++)
+	// Assign orphans to unmatched positions (patch in place) or create fresh nodes
+	var orphanIdx = 0;
+	for (var i = 0; i < unmatchedPositions.length; i++)
 	{
-		var desired = newDomOrder[i];
-
-		// Skip extension-injected nodes in the cursor scan
-		while (cursor < domChildNodes.length
-			&& domChildNodes[cursor].nodeType === 1
-			&& !domChildNodes[cursor].hasAttribute(_VirtualDom_MARKER)
-			&& domChildNodes[cursor] !== desired)
+		var pos = unmatchedPositions[i];
+		var yKid = yKids[pos].b;
+		if (orphanIdx < orphanPool.length)
 		{
-			cursor++;
-		}
-
-		if (cursor < domChildNodes.length && domChildNodes[cursor] === desired)
-		{
-			// Already in the right position
-			cursor++;
-		}
-		else if (desired.parentNode === domNode)
-		{
-			// Needs to move
-			if (_moveBefore)
-			{
-				_moveBefore(desired, domChildNodes[cursor] || null);
-			}
-			else
-			{
-				domNode.insertBefore(desired, domChildNodes[cursor] || null);
-			}
-			cursor++;
+			// Recycle: patch an existing DOM node instead of destroy+create.
+			// For compatible node types this is an in-place attribute/text patch.
+			// For incompatible types _VirtualDom_updateTNode calls redrawTNode
+			// which does replaceChild, keeping the new element in the same DOM slot.
+			var orphan = orphanPool[orphanIdx++];
+			var newTNode = _VirtualDom_updateTNode(orphan.tNode, orphan.vnode, yKid, eventNode);
+			newKidTNodes[pos] = newTNode;
+			newDomOrder[pos] = _VirtualDom_tNodeDomNode(newTNode);
 		}
 		else
 		{
-			// New node — insert at cursor position
-			domNode.insertBefore(desired, domChildNodes[cursor] || null);
-			cursor++;
+			// No orphan available: create a fresh DOM node
+			var newTNode = _VirtualDom_render(yKid, eventNode);
+			newKidTNodes[pos] = newTNode;
+			newDomOrder[pos] = _VirtualDom_tNodeDomNode(newTNode);
+		}
+	}
+
+	// Remove only the orphans that were not recycled
+	for (var i = orphanIdx; i < orphanPool.length; i++)
+	{
+		var oldDom = _VirtualDom_tNodeDomNode(orphanPool[i].tNode);
+		if (oldDom.parentNode)
+		{
+			oldDom.parentNode.removeChild(oldDom);
+		}
+	}
+
+	// Efficient O(n log n) DOM reordering using minimum-moves algorithm.
+	// Computes the LIS of current DOM positions in desired order and only
+	// moves elements NOT in the LIS, processing right-to-left so that
+	// anchor references remain valid throughout.
+	var _moveBeforeOp = domNode.moveBefore ? domNode.moveBefore.bind(domNode) : null;
+
+	// Snapshot current marker-element positions before any moves
+	var domElems = [];
+	for (var c = domNode.firstChild; c; c = c.nextSibling)
+	{
+		if (c.nodeType === 1 && c.hasAttribute(_VirtualDom_MARKER))
+		{
+			domElems.push(c);
+		}
+	}
+	var nodeToIdx = new Map();
+	for (var i = 0; i < domElems.length; i++)
+	{
+		nodeToIdx.set(domElems[i], i);
+	}
+
+	// Compute old indices for desired order (-1 for new/untracked elements)
+	var oldIndices = new Array(newDomOrder.length);
+	for (var i = 0; i < newDomOrder.length; i++)
+	{
+		var idx = nodeToIdx.get(newDomOrder[i]);
+		oldIndices[i] = (idx !== undefined) ? idx : -1;
+	}
+
+	// Find which positions are already in relative order (LIS)
+	var lisSet = _VirtualDom_lisIndices(oldIndices);
+
+	// Move non-LIS elements right-to-left; each gets inserted before its successor
+	for (var i = newDomOrder.length - 1; i >= 0; i--)
+	{
+		if (lisSet.has(i)) { continue; }
+		var el = newDomOrder[i];
+		var anchor = (i + 1 < newDomOrder.length) ? newDomOrder[i + 1] : null;
+		if (_moveBeforeOp)
+		{
+			_moveBeforeOp(el, anchor);
+		}
+		else
+		{
+			domNode.insertBefore(el, anchor);
 		}
 	}
 
@@ -1967,6 +2148,7 @@ function _VirtualDom_updateTNodeKeyedKids(domNode, kidTNodes, xKids, yKids, even
  */
 function _VirtualDom_hydrate(domNode, vNode, eventNode)
 {
+	_VirtualDom_stampMarkers = true;
 	var tNode = _VirtualDom_hydrateHelp(domNode, vNode, eventNode);
 	var rootDom = _VirtualDom_tNodeDomNode(tNode);
 	rootDom.__canopyTree = tNode;
