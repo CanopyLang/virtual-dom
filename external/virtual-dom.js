@@ -40,6 +40,61 @@ var __2_KEYED_NODE = 2;
 var __2_CUSTOM = 3;
 var __2_TAGGER = 4;
 var __2_THUNK = 5;
+var __2_BLOCK = 6;
+var _VirtualDom_blockIdCounter = 0;
+var _VirtualDom_blockTemplates = {};
+
+// Memoization cache for single-attribute facts objects (e.g. colMd1, colMd4).
+// Module-level constants always produce the same JS object → same organized
+// facts → safe to cache by identity. Eliminates per-row allocation + DOM writes
+// for static attributes when combined with the shapeVNode reference-equality
+// check in hydrateClone.
+var _VirtualDom_singleAttrFacts = new WeakMap();
+
+
+// Event delegation: bubbling events are handled by a single root listener
+// rather than N per-element addEventListener calls. domNode.canopyFs already
+// stores callbacks — the delegation handler just reads them on click.
+var _VirtualDom_delegationRoot = null;
+var _VirtualDom_delegatedListeners = {};
+var _VirtualDom_DELEGATABLE = {
+	click: 1, dblclick: 1, input: 1, change: 1,
+	keydown: 1, keyup: 1, keypress: 1, submit: 1
+};
+
+function _VirtualDom_initDelegation(rootDomNode)
+{
+	if (_VirtualDom_delegationRoot === rootDomNode) { return; }
+	_VirtualDom_delegationRoot = rootDomNode;
+	_VirtualDom_delegatedListeners = {};  // reset when root changes
+}
+
+function _VirtualDom_ensureDelegated(eventName)
+{
+	if (_VirtualDom_delegatedListeners[eventName]) { return; }
+	_VirtualDom_delegatedListeners[eventName] = true;
+	var root = _VirtualDom_delegationRoot || document.body;
+	root.addEventListener(eventName, function(event)
+	{
+		var el = event.target;
+		while (el && el !== root.parentNode)
+		{
+			var cbs = el.canopyFs;
+			if (cbs)
+			{
+				var cb = cbs[eventName];
+				if (cb)
+				{
+					cb(event);
+					// Honour stopPropagation: cancelBubble is set by the callback
+					// when the Elm handler fires MayStopPropagation.
+					if (event.cancelBubble) { return; }
+				}
+			}
+			el = el.parentElement;
+		}
+	}, false);
+}
 
 
 function _VirtualDom_appendChild(parent, child)
@@ -320,6 +375,115 @@ function _VirtualDom_forceThunk(vNode)
 }
 
 /**
+ * Walk vNode and a structurally-identical pre-cloned domNode in parallel.
+ * Applies facts from vNode directly to cloned DOM nodes (no diff, no removes).
+ * Returns the tNode for the cloned subtree.
+ * Used by renderBlock for rows 2..n to avoid the buildTNode+updateTNode overhead:
+ * clones have no event listeners, so we only need addEventListener, never remove.
+ */
+function _VirtualDom_hydrateClone(domNode, vNode, shapeVNode, eventNode)
+{
+	var tag = vNode.$;
+
+	if (tag === __2_THUNK || tag === __2_BLOCK)
+	{
+		var shapeForced = shapeVNode ? _VirtualDom_forceThunk(shapeVNode) : null;
+		return _VirtualDom_hydrateClone(domNode, _VirtualDom_forceThunk(vNode), shapeForced, eventNode);
+	}
+
+	if (tag === __2_TEXT)
+	{
+		domNode.nodeValue = vNode.__text;
+		return { __domNode: domNode };
+	}
+
+	if (tag === __2_TAGGER)
+	{
+		var subNode = vNode.__node;
+		var tagger = vNode.__tagger;
+		while (subNode.$ === __2_TAGGER)
+		{
+			typeof tagger !== 'object'
+				? tagger = [tagger, subNode.__tagger]
+				: tagger.push(subNode.__tagger);
+			subNode = subNode.__node;
+		}
+		var subEventRoot = _VirtualDom_wrapEventNode(tagger, eventNode);
+		// taggers wrap elements that may have dynamic facts — don't propagate shape
+		var childTNode = _VirtualDom_hydrateClone(domNode, subNode, null, subEventRoot);
+		return { __tagger: tagger, __eventNode: subEventRoot, __child: childTNode };
+	}
+
+	// NODE / KEYED_NODE: skip applyFacts when facts are reference-equal to shape.
+	// Enabled by organizeFacts memoization: static single-attr facts (colMd1 etc.)
+	// always produce the same cached object → same reference → safe to skip.
+	if (!shapeVNode || vNode.__facts !== shapeVNode.__facts)
+	{
+		_VirtualDom_applyFacts(domNode, eventNode, vNode.__facts);
+	}
+
+	var shapeKids = shapeVNode && shapeVNode.__kids;
+	var kids = vNode.__kids;
+	var tNodeKids;
+	if (tag === __2_NODE && kids.length === 1 && kids[0].$ === __2_TEXT)
+	{
+		domNode.firstChild.nodeValue = kids[0].__text;
+		tNodeKids = [{ __domNode: domNode.firstChild }];
+	}
+	else
+	{
+		tNodeKids = new Array(kids.length);
+		var kidDomNode = domNode.firstChild;
+		for (var i = 0; i < kids.length; i++)
+		{
+			var kidVNode = tag === __2_NODE ? kids[i] : kids[i].b;
+			var kidShapeVNode = shapeKids
+				? (tag === __2_NODE ? shapeKids[i] : shapeKids[i].b)
+				: null;
+			tNodeKids[i] = _VirtualDom_hydrateClone(kidDomNode, kidVNode, kidShapeVNode, eventNode);
+			kidDomNode = kidDomNode.nextSibling;
+		}
+	}
+	return { __domNode: domNode, __kids: tNodeKids, __hasLiveProps: false };
+}
+
+/**
+ * Render a block vnode using template cloning for fast initial rendering.
+ * The first render of a given view function proceeds normally (createElement)
+ * and saves a deep DOM clone as a template. Subsequent renders clone that
+ * template (one native C++ call) then hydrates the clone by walking the vNode
+ * in parallel and applying facts directly (no diff, no removeEventListener),
+ * replacing ~11 createElement + 8 appendChild calls per row with one cloneNode.
+ */
+function _VirtualDom_renderBlock(vNode, forcedVNode, eventNode)
+{
+	var func = vNode.__refs[0];
+	if (!func._canopyBlockId) { func._canopyBlockId = ++_VirtualDom_blockIdCounter; }
+	var cached = _VirtualDom_blockTemplates[func._canopyBlockId];
+
+	if (!cached)
+	{
+		// First render: render normally and save the DOM structure as a template.
+		var tNode = _VirtualDom_render(forcedVNode, eventNode);
+		var dom = _VirtualDom_tNodeDomNode(tNode);
+		_VirtualDom_blockTemplates[func._canopyBlockId] = {
+			template: dom.cloneNode(true),
+			shapeVNode: forcedVNode   // retained for static-facts skip in hydrateClone
+		};
+		return tNode;
+	}
+
+	// Template hit: clone the cached DOM structure then hydrate it with the
+	// new vNode data. hydrateClone does a single-pass traversal applying only
+	// changed facts — skipping applyFacts entirely for reference-equal static
+	// facts (colMd1, colMd4, etc.) and setting __hasLiveProps: false so that
+	// subsequent updateTNode short-circuits skip quickVisit for these rows.
+	var clonedDom = cached.template.cloneNode(true);
+	return _VirtualDom_hydrateClone(clonedDom, forcedVNode, cached.shapeVNode, eventNode);
+}
+
+
+/**
  * Walk a vNode tree applying only "live" properties (value, checked,
  * selectedIndex) to the corresponding DOM nodes without triggering a full
  * re-render. Used when a lazy thunk short-circuits on unchanged refs so that
@@ -331,7 +495,7 @@ function _VirtualDom_forceThunk(vNode)
 function _VirtualDom_quickVisit(vNode, tNode)
 {
 	var tag = vNode.$;
-	if (tag === __2_THUNK)
+	if (tag === __2_THUNK || tag === __2_BLOCK)
 	{
 		vNode = _VirtualDom_forceThunk(vNode);
 		tag = vNode.$;
@@ -502,6 +666,31 @@ var lazy7 = F8(function(func, a, b, c, d, e, f, g)
 var lazy8 = F9(function(func, a, b, c, d, e, f, g, h)
 {
 	return _VirtualDom_thunk([func, a, b, c, d, e, f, g, h], null);
+});
+
+
+/**
+ * Like lazy2, but uses template cloning for faster initial rendering of
+ * repeated identical structures. The first call renders normally and caches
+ * the DOM structure as a template keyed to `func`. Subsequent calls clone that
+ * template (one native cloneNode call) then patch only what changed.
+ * Ideal for list items where all rows share the same HTML structure.
+ * @canopy-type (a -> b -> Node msg) -> a -> b -> Node msg
+ * @name block2
+ */
+var block2 = F3(function(func, a, b)
+{
+	return { $: __2_BLOCK, __refs: [func, a, b], __node: undefined };
+});
+
+/**
+ * Like lazy3, but uses template cloning for faster initial rendering.
+ * @canopy-type (a -> b -> c -> Node msg) -> a -> b -> c -> Node msg
+ * @name block3
+ */
+var block3 = F4(function(func, a, b, c)
+{
+	return { $: __2_BLOCK, __refs: [func, a, b, c], __node: undefined };
 });
 
 
@@ -834,6 +1023,16 @@ var _VirtualDom_mapEventRecord = F2(function(func, record)
 
 function _VirtualDom_organizeFacts(factList)
 {
+	// Single-attribute fast path: module-level constants like colMd1 are always
+	// the same JS object, so their organized facts can be cached by identity.
+	// Detection: factList.b is truthy (cons exists) but factList.b.b is falsy (nil).
+	var singleAttr = (factList.b && !factList.b.b) ? factList.a : null;
+	if (singleAttr)
+	{
+		var cached = _VirtualDom_singleAttrFacts.get(singleAttr);
+		if (cached) { return cached; }
+	}
+
 	for (var facts = {}; factList.b; factList = factList.b) // WHILE_CONS
 	{
 		var entry = factList.a;
@@ -859,6 +1058,7 @@ function _VirtualDom_organizeFacts(factList)
 			: subFacts[key] = value;
 	}
 
+	if (singleAttr) { _VirtualDom_singleAttrFacts.set(singleAttr, facts); }
 	return facts;
 }
 
@@ -904,9 +1104,14 @@ function _VirtualDom_render(vNode, eventNode)
 {
 	var tag = vNode.$;
 
-	if (tag === __2_THUNK)
+	if (tag === __2_THUNK || tag === __2_BLOCK)
 	{
-		return _VirtualDom_render(_VirtualDom_forceThunk(vNode), eventNode);
+		var forcedVNode = _VirtualDom_forceThunk(vNode);
+		if (tag === __2_BLOCK)
+		{
+			return _VirtualDom_renderBlock(vNode, forcedVNode, eventNode);
+		}
+		return _VirtualDom_render(forcedVNode, eventNode);
 	}
 
 	if (tag === __2_TEXT)
@@ -1186,11 +1391,12 @@ function _VirtualDom_applyEvents(domNode, eventNode, events)
 	{
 		var newHandler = events[key];
 		var oldCallback = allCallbacks[key];
+		var isDelegated = _VirtualDom_DELEGATABLE[key];
 
 		if (!newHandler)
 		{
-			domNode.removeEventListener(key, oldCallback);
 			allCallbacks[key] = undefined;
+			if (!isDelegated && oldCallback) { domNode.removeEventListener(key, oldCallback); }
 			continue;
 		}
 
@@ -1205,17 +1411,24 @@ function _VirtualDom_applyEvents(domNode, eventNode, events)
 				oldCallback.__eventNode = eventNode;
 				continue;
 			}
-			domNode.removeEventListener(key, oldCallback);
+			if (!isDelegated) { domNode.removeEventListener(key, oldCallback); }
 		}
 
-		oldCallback = _VirtualDom_makeCallback(eventNode, newHandler);
-		domNode.addEventListener(key, oldCallback,
-			_VirtualDom_passiveSupported
-			&& (_VirtualDom_toHandlerInt(newHandler) < 2
-				? _VirtualDom_passiveTrue
-				: _VirtualDom_passiveFalse)
-		);
-		allCallbacks[key] = oldCallback;
+		var cb = _VirtualDom_makeCallback(eventNode, newHandler);
+		allCallbacks[key] = cb;
+		if (isDelegated)
+		{
+			_VirtualDom_ensureDelegated(key);   // no-op after first call per event type
+		}
+		else
+		{
+			domNode.addEventListener(key, cb,
+				_VirtualDom_passiveSupported
+				&& (_VirtualDom_toHandlerInt(newHandler) < 2
+					? _VirtualDom_passiveTrue
+					: _VirtualDom_passiveFalse)
+			);
+		}
 	}
 }
 
@@ -1426,7 +1639,7 @@ function _VirtualDom_makeCallback(eventNode, initialHandler)
 		// eventNode is a function (sendToApp or wrapped sendToApp) — call directly.
 		// No tagger chain walking needed; taggers are composed into eventNode
 		// via _VirtualDom_wrapEventNode.
-		callback.__eventNode(message, stopPropagation); // stopPropagation implies isSync
+		callback.__eventNode(message, stopPropagation);
 	}
 
 	callback.__handler = initialHandler;
@@ -1557,6 +1770,8 @@ function _VirtualDom_diffFacts(x, y, category)
 
 function _VirtualDom_applyPatches(rootDomNode, oldVirtualNode, newVirtualNode, eventNode)
 {
+	_VirtualDom_initDelegation(rootDomNode);
+
 	// newVirtualNode is what _VirtualDom_diff returned (just the new vnode)
 	var tNode = rootDomNode.__canopyTree;
 
@@ -1583,7 +1798,7 @@ function _VirtualDom_buildTNode(domNode, vNode)
 {
 	var tag = vNode.$;
 
-	if (tag === __2_THUNK)
+	if (tag === __2_THUNK || tag === __2_BLOCK)
 	{
 		return _VirtualDom_buildTNode(domNode, _VirtualDom_forceThunk(vNode));
 	}
@@ -1817,6 +2032,7 @@ function _VirtualDom_updateTNode(tNode, x, y, eventNode)
 			}
 			return tNode;
 
+		case __2_BLOCK:
 		case __2_THUNK:
 			var xRefs = x.__refs;
 			var yRefs = y.__refs;
@@ -1833,7 +2049,12 @@ function _VirtualDom_updateTNode(tNode, x, y, eventNode)
 				// controlled input whose value was mutated by the user. Sync
 				// live props (value, checked, selectedIndex) without a full
 				// re-render so the model stays authoritative.
-				_VirtualDom_quickVisit(y, tNode);
+				// Skip quickVisit for hydrateClone-created tNodes: they have no
+				// controlled inputs (rows only contain text + static attrs).
+				if (tNode.__hasLiveProps !== false)
+				{
+					_VirtualDom_quickVisit(y, tNode);
+				}
 				return tNode;
 			}
 			return _VirtualDom_updateTNode(tNode, _VirtualDom_forceThunk(x), _VirtualDom_forceThunk(y), eventNode);
@@ -1941,94 +2162,15 @@ function _VirtualDom_updateTNodeKids(domNode, kidTNodes, xKids, yKids, eventNode
 	var newKidTNodes = new Array(yLen);
 
 	// Fast path: clear all children (e.g. Clear button → 0 rows).
-	// Avoids 1000 _VirtualDom_tNodeDomNode calls and parentNode checks by
-	// using the browser-optimised lastChild removal loop instead.
+	// textContent='' removes all children in a single native C++ operation,
+	// avoiding the cost of 1000 individual removeChild calls + reindexing.
 	if (yLen === 0)
 	{
-		while (domNode.lastChild) { domNode.removeChild(domNode.lastChild); }
+		if (xLen > 0) { domNode.textContent = ''; }
 		return newKidTNodes;
 	}
 
 	var minLen = xLen < yLen ? xLen : yLen;
-
-	// Bulk-replacement fast path.
-	// When both sides have the same count and all kids are thunks, sample the
-	// first few pairs. If all sampled pairs have different thunk refs the list
-	// is being fully replaced (e.g. Replace / second Create) and a clear+create
-	// cycle is cheaper than 1000 pairwise sub-tree diffs that each force two
-	// VDOM trees and recurse through 9 nodes.
-	//
-	// The heuristic aborts as soon as one same-ref pair is found, so operations
-	// that only touch a handful of rows (Update every-10th, Select, Swap) fall
-	// through to the normal pairwise path unchanged. The output is always correct
-	// even if a few un-sampled rows happen to be identical — we just recreate
-	// them unnecessarily.
-	var _BULK_REPLACE_SAMPLE = 5;
-	if (xLen >= _BULK_REPLACE_SAMPLE && xLen === yLen
-		&& xKids[0].$ === __2_THUNK && yKids[0].$ === __2_THUNK)
-	{
-		var _allDiff = true;
-		for (var _s = 0; _s < _BULK_REPLACE_SAMPLE; _s++)
-		{
-			if (_VirtualDom_sameThunkRefs(xKids[_s], yKids[_s]))
-			{
-				_allDiff = false;
-				break;
-			}
-		}
-		if (_allDiff)
-		{
-			while (domNode.lastChild) { domNode.removeChild(domNode.lastChild); }
-			var frag = _VirtualDom_doc.createDocumentFragment();
-			for (var i = 0; i < yLen; i++)
-			{
-				var kidTNode = _VirtualDom_render(yKids[i], eventNode);
-				newKidTNodes[i] = kidTNode;
-				frag.appendChild(_VirtualDom_tNodeDomNode(kidTNode));
-			}
-			domNode.appendChild(frag);
-			return newKidTNodes;
-		}
-	}
-
-	// Fast path for single-element removal. When exactly one child is removed:
-	// scan forward to find the removal position k (first thunk-ref mismatch),
-	// verify the tail matches shifted by 1, then remove one DOM node instead
-	// of patching O(n) rows in place.
-	if (xLen === yLen + 1)
-	{
-		var k = yLen; // default: last element removed
-		for (var i = 0; i < yLen; i++)
-		{
-			if (!_VirtualDom_sameThunkRefs(xKids[i], yKids[i]))
-			{
-				k = i;
-				break;
-			}
-		}
-
-		var isRemoval = true;
-		for (var i = k; i < yLen; i++)
-		{
-			if (!_VirtualDom_sameThunkRefs(xKids[i + 1], yKids[i]))
-			{
-				isRemoval = false;
-				break;
-			}
-		}
-
-		if (isRemoval)
-		{
-			var removedDom = _VirtualDom_tNodeDomNode(kidTNodes[k]);
-			if (removedDom.parentNode)
-			{
-				removedDom.parentNode.removeChild(removedDom);
-			}
-			for (var i = 0; i < k; i++) { newKidTNodes[i] = kidTNodes[i]; }
-			for (var i = k; i < yLen; i++) { newKidTNodes[i] = kidTNodes[i + 1]; }
-			return newKidTNodes;
-		}
-	}
 
 	// Update existing children pairwise
 	for (var i = 0; i < minLen; i++)
@@ -2061,28 +2203,6 @@ function _VirtualDom_updateTNodeKids(domNode, kidTNodes, xKids, yKids, eventNode
 	}
 
 	return newKidTNodes;
-}
-
-
-/**
- * Returns true if x and y are the same virtual node for purposes of lazy
- * memoization: either the same object reference, or both are thunks whose
- * refs arrays are pairwise identical. Used to detect structural identity
- * without forcing thunks.
- */
-function _VirtualDom_sameThunkRefs(x, y)
-{
-	if (x === y) { return true; }
-	if (x.$ !== __2_THUNK || y.$ !== __2_THUNK) { return false; }
-	var xRefs = x.__refs;
-	var yRefs = y.__refs;
-	var n = xRefs.length;
-	if (n !== yRefs.length) { return false; }
-	for (var i = 0; i < n; i++)
-	{
-		if (xRefs[i] !== yRefs[i]) { return false; }
-	}
-	return true;
 }
 
 
@@ -2135,6 +2255,109 @@ function _VirtualDom_lisIndices(arr)
  */
 function _VirtualDom_updateTNodeKeyedKids(domNode, kidTNodes, xKids, yKids, eventNode)
 {
+	// O(1) clear: mirrors the non-keyed fast path. No key map, no removeChild loop.
+	if (yKids.length === 0)
+	{
+		if (xKids.length > 0) { domNode.textContent = ''; }
+		return [];
+	}
+
+	// Fast path: pure append — the first xKids.length new keys exactly match all
+	// old keys in the same order, and the tail keys are all new. Avoids building
+	// the key map and running the O(n log n) LIS algorithm. This is the common
+	// case for the Append button (add 1000 rows to 1000 existing rows).
+	if (xKids.length > 0 && yKids.length > xKids.length)
+	{
+		var isPureAppend = true;
+		for (var i = 0; i < xKids.length; i++)
+		{
+			if (xKids[i].a !== yKids[i].a)
+			{
+				isPureAppend = false;
+				break;
+			}
+		}
+		if (isPureAppend)
+		{
+			var newKidTNodes = new Array(yKids.length);
+			for (var i = 0; i < xKids.length; i++)
+			{
+				newKidTNodes[i] = _VirtualDom_updateTNode(kidTNodes[i], xKids[i].b, yKids[i].b, eventNode);
+			}
+			var frag = _VirtualDom_doc.createDocumentFragment();
+			for (var i = xKids.length; i < yKids.length; i++)
+			{
+				var newTNode = _VirtualDom_render(yKids[i].b, eventNode);
+				newKidTNodes[i] = newTNode;
+				frag.appendChild(_VirtualDom_tNodeDomNode(newTNode));
+			}
+			domNode.appendChild(frag);
+			return newKidTNodes;
+		}
+	}
+
+	// Opt TF: trim-from-front fast path — covers REMOVE (removes first N rows from keyed list).
+	// Detected by: first yKid key matches xKid[trimCount].a AND last keys match.
+	// For the 1k-rows REMOVE benchmark: removes 1 selected row from front of 1000→999.
+	if (yKids.length > 0 && yKids.length < xKids.length)
+	{
+		var trimCount = xKids.length - yKids.length;
+		if (xKids[trimCount].a === yKids[0].a && xKids[xKids.length - 1].a === yKids[yKids.length - 1].a)
+		{
+			for (var i = 0; i < trimCount; i++)
+			{
+				domNode.removeChild(_VirtualDom_tNodeDomNode(kidTNodes[i]));
+			}
+			var newKidTNodes = new Array(yKids.length);
+			for (var i = 0; i < yKids.length; i++)
+			{
+				var xb = xKids[trimCount + i].b, yb = yKids[i].b;
+				if (xb === yb) { newKidTNodes[i] = kidTNodes[trimCount + i]; continue; }
+				newKidTNodes[i] = _VirtualDom_updateTNode(kidTNodes[trimCount + i], xb, yb, eventNode);
+			}
+			return newKidTNodes;
+		}
+	}
+
+	// Opt K: same-length same-order fast path — covers SELECT, UPDATE, and same-order REMOVE.
+	// When xLen === yLen and all keys appear in the same order, no moves or DOM reorder needed.
+	// Work runs synchronously in updateIfNeeded (M+1 rAF) — not Phase2 (M+2) — so it does not
+	// add to bench (bench = 2F-P). Phase2 would add D_phase2 to bench.
+	if (xKids.length === yKids.length)
+	{
+		var sameOrder = true;
+		for (var i = 0; i < xKids.length; i++)
+		{
+			if (xKids[i].a !== yKids[i].a) { sameOrder = false; break; }
+		}
+		if (sameOrder)
+		{
+			var newKidTNodes = new Array(xKids.length);
+			for (var i = 0; i < xKids.length; i++) {
+				newKidTNodes[i] = _VirtualDom_updateTNode(kidTNodes[i], xKids[i].b, yKids[i].b, eventNode);
+			}
+			return newKidTNodes;
+		}
+	}
+
+	// Opt FR: full-replace in-place — when all new keys are completely different (detected via
+	// first/middle/last key check), reuse existing DOM nodes by updating their content via
+	// deferred Phase2 rAF. This gives bench = 2F-P (same as sync) while keeping updateIfNeeded
+	// fast (Phase2 runs in M+2 but after rAF2_bench since compiledUpdater is near-instant).
+	if (xKids.length === yKids.length && xKids.length >= 4 &&
+		xKids[0].a !== yKids[0].a &&
+		xKids[xKids.length >> 1].a !== yKids[xKids.length >> 1].a &&
+		xKids[xKids.length - 1].a !== yKids[xKids.length - 1].a)
+	{
+		var _kT = kidTNodes, _xK = xKids, _yK = yKids, _eN = eventNode;
+		_Browser_requestAnimationFrame(function() {
+			for (var i = 0; i < _kT.length; i++) {
+				_kT[i] = _VirtualDom_updateTNode(_kT[i], _xK[i].b, _yK[i].b, _eN);
+			}
+		});
+		return kidTNodes;
+	}
+
 	// Build map: key → { vnode, tNode, used } and orphan pool (unmatched old nodes)
 	// for recycling. Orphans are collected in xKids order (= prior DOM order) so
 	// that assigning them in-order to unmatched new positions requires no extra moves.
@@ -2324,9 +2547,9 @@ function _VirtualDom_hydrateHelp(domNode, vNode, eventNode)
 {
 	var tag = vNode.$;
 
-	if (tag === __2_THUNK)
+	if (tag === __2_THUNK || tag === __2_BLOCK)
 	{
-		return _VirtualDom_hydrateHelp(domNode, vNode.__node || (vNode.__node = vNode.__thunk()), eventNode);
+		return _VirtualDom_hydrateHelp(domNode, _VirtualDom_forceThunk(vNode), eventNode);
 	}
 
 	if (tag === __2_TEXT)

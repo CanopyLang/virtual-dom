@@ -8,6 +8,7 @@ module VirtualDom exposing
   , map, mapAttribute
   , keyedNode, keyedNodeNS
   , lazy, lazy2, lazy3, lazy4, lazy5, lazy6, lazy7, lazy8
+  , block2, block3
   , toHandlerInt
   , cssAttribute
   )
@@ -32,6 +33,9 @@ that expose more helper functions for HTML or SVG.
 
 # Lazy Nodes
 @docs lazy, lazy2, lazy3, lazy4, lazy5, lazy6, lazy7, lazy8
+
+# Block Nodes
+@docs block2, block3
 
 # Scoped CSS
 @docs cssAttribute
@@ -347,6 +351,26 @@ lazy7 =
 lazy8 : (a -> b -> c -> d -> e -> f -> g -> h -> Node msg) -> a -> b -> c -> d -> e -> f -> g -> h -> Node msg
 lazy8 =
   VirtualDomFFI.lazy8
+
+
+{-| Like `lazy2` but uses template cloning for faster initial rendering of
+repeated identical structures. The first call renders normally and caches the
+DOM structure keyed to the view function. Subsequent calls clone that template
+(one native C++ call) then patch only the changed facts and text nodes.
+
+Use this for list items where all rows share the same HTML structure.
+-}
+block2 : (a -> b -> Node msg) -> a -> b -> Node msg
+block2 =
+  VirtualDomFFI.block2
+
+
+{-| Like `lazy3` but uses template cloning for faster initial rendering.
+See `block2` for details.
+-}
+block3 : (a -> b -> c -> Node msg) -> a -> b -> c -> Node msg
+block3 =
+  VirtualDomFFI.block3
 
 
 
