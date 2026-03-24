@@ -409,8 +409,16 @@ function _VirtualDom_hydrateClone(domNode, vNode, shapeVNode, eventNode)
 			subNode = subNode.__node;
 		}
 		var subEventRoot = _VirtualDom_wrapEventNode(tagger, eventNode);
-		// taggers wrap elements that may have dynamic facts — don't propagate shape
-		var childTNode = _VirtualDom_hydrateClone(domNode, subNode, null, subEventRoot);
+		// Propagate shape through the tagger chain so that static facts on child
+		// elements (colMd1, colMd4, etc.) can still be skipped via reference equality.
+		// We advance shapeVNode through its own tagger layers to reach the same element.
+		var shapeChild = null;
+		if (shapeVNode && shapeVNode.$ === __2_TAGGER)
+		{
+			shapeChild = shapeVNode.__node;
+			while (shapeChild && shapeChild.$ === __2_TAGGER) { shapeChild = shapeChild.__node; }
+		}
+		var childTNode = _VirtualDom_hydrateClone(domNode, subNode, shapeChild, subEventRoot);
 		return { __tagger: tagger, __eventNode: subEventRoot, __child: childTNode };
 	}
 
@@ -479,7 +487,9 @@ function _VirtualDom_renderBlock(vNode, forcedVNode, eventNode)
 	// facts (colMd1, colMd4, etc.) and setting __hasLiveProps: false so that
 	// subsequent updateTNode short-circuits skip quickVisit for these rows.
 	var clonedDom = cached.template.cloneNode(true);
-	return _VirtualDom_hydrateClone(clonedDom, forcedVNode, cached.shapeVNode, eventNode);
+	var tNode = _VirtualDom_hydrateClone(clonedDom, forcedVNode, cached.shapeVNode, eventNode);
+	clonedDom.__canopyTree = tNode;
+	return tNode;
 }
 
 
@@ -2260,6 +2270,23 @@ function _VirtualDom_updateTNodeKeyedKids(domNode, kidTNodes, xKids, yKids, even
 	{
 		if (xKids.length > 0) { domNode.textContent = ''; }
 		return [];
+	}
+
+	// Opt EC: empty-to-N fast path — xKids is empty (initial create). Render all
+	// new rows into a single DocumentFragment and append in one DOM call. Avoids
+	// building the key map and running the LIS algorithm entirely.
+	if (xKids.length === 0)
+	{
+		var frag = _VirtualDom_doc.createDocumentFragment();
+		var newKidTNodes = new Array(yKids.length);
+		for (var i = 0; i < yKids.length; i++)
+		{
+			var newTNode = _VirtualDom_render(yKids[i].b, eventNode);
+			newKidTNodes[i] = newTNode;
+			frag.appendChild(_VirtualDom_tNodeDomNode(newTNode));
+		}
+		domNode.appendChild(frag);
+		return newKidTNodes;
 	}
 
 	// Fast path: pure append — the first xKids.length new keys exactly match all
