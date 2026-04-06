@@ -1,0 +1,167 @@
+module DiffTestHelper exposing
+    ( Container
+    , renderToContainer
+    , updateInContainer
+    , getChildCount
+    , getChildTag
+    , getChildText
+    , getTextContent
+    , getInnerHTML
+    , getDomAttribute
+    , getDomProperty
+    , getDomStyle
+    , getChildAtPath
+    , isDomSameNode
+    , getRootTag
+    , getRootText
+    )
+
+{-| FFI-backed helpers for testing the VirtualDom diff/patch algorithm
+against real DOM nodes.
+
+Unlike TestHelper which inspects vnode data structures, this module
+renders vnodes to actual browser DOM and applies diff/patch updates.
+The inspection functions then read from the real DOM to verify that
+the diff algorithm produced the correct result.
+
+Typical usage:
+
+    container = renderToContainer (Html.div [] [ Html.text "hello" ])
+    -- assert getTextContent container == "hello"
+    container2 = updateInContainer container oldView newView
+    -- assert changes were applied to the DOM
+
+-}
+
+import Basics exposing (..)
+import Maybe exposing (Maybe)
+import VirtualDom
+
+foreign import javascript "external/diff-test-helper.js" as DiffTestHelperFFI
+
+
+{-| Opaque handle to a DOM container element holding a rendered virtual DOM tree.
+Used by all inspection functions to read the resulting DOM state.
+-}
+type Container = Container
+
+
+{-| Render a VirtualDom.Node into a fresh container div appended to the document body.
+The container holds the rendered DOM tree and can be inspected or updated.
+-}
+renderToContainer : VirtualDom.Node msg -> Container
+renderToContainer =
+    DiffTestHelperFFI.renderToContainer
+
+
+{-| Apply a diff/patch update to a previously rendered container. Takes the old
+vnode (which must match what was last rendered) and the new vnode. The diff
+algorithm computes minimal patches and applies them to the real DOM.
+-}
+updateInContainer : Container -> VirtualDom.Node msg -> VirtualDom.Node msg -> Container
+updateInContainer =
+    DiffTestHelperFFI.updateInContainer
+
+
+{-| Count the number of child nodes of the rendered root element. Returns 0
+if the container is empty or the root is a text node.
+-}
+getChildCount : Container -> Int
+getChildCount =
+    DiffTestHelperFFI.getChildCount
+
+
+{-| Get the tag name of a child node at the given index within the rendered root.
+Returns Nothing if the index is out of bounds or the child is a text node.
+Tag names are returned lowercase (e.g. "div", "span").
+-}
+getChildTag : Container -> Int -> Maybe String
+getChildTag =
+    DiffTestHelperFFI.getChildTag
+
+
+{-| Get the text content of a child node at the given index within the rendered root.
+Returns Nothing if the index is out of bounds.
+-}
+getChildText : Container -> Int -> Maybe String
+getChildText =
+    DiffTestHelperFFI.getChildText
+
+
+{-| Get the full text content of the rendered root element, including all
+descendant text. Equivalent to the DOM textContent property.
+-}
+getTextContent : Container -> String
+getTextContent =
+    DiffTestHelperFFI.getTextContent
+
+
+{-| Get the innerHTML of the rendered root element. Useful for verifying
+the full DOM structure as a string.
+-}
+getInnerHTML : Container -> String
+getInnerHTML =
+    DiffTestHelperFFI.getInnerHTML
+
+
+{-| Get the value of a DOM attribute on the rendered root element.
+Returns Nothing if the attribute is not present. This reads from
+getAttribute, not from DOM properties.
+-}
+getDomAttribute : Container -> String -> Maybe String
+getDomAttribute =
+    DiffTestHelperFFI.getDomAttribute
+
+
+{-| Get the value of a DOM property on the rendered root element as a string.
+Returns Nothing if the property is undefined. Boolean and numeric
+properties are converted to their string representation.
+-}
+getDomProperty : Container -> String -> Maybe String
+getDomProperty =
+    DiffTestHelperFFI.getDomProperty
+
+
+{-| Get the value of a CSS style property on the rendered root element.
+Returns Nothing if the style property is not set. Accepts either
+camelCase ("backgroundColor") or kebab-case ("background-color").
+-}
+getDomStyle : Container -> String -> Maybe String
+getDomStyle =
+    DiffTestHelperFFI.getDomStyle
+
+
+{-| Walk a path of child indices from the rendered root to find a nested DOM node.
+For example, [0, 2, 1] navigates to root.childNodes[0].childNodes[2].childNodes[1].
+Returns Nothing if any index along the path is out of bounds.
+The returned Container can be used with isDomSameNode for identity checks.
+-}
+getChildAtPath : Container -> List Int -> Maybe Container
+getChildAtPath =
+    DiffTestHelperFFI.getChildAtPath
+
+
+{-| Check if two DOM node references are the exact same object. Used to verify
+that the diff algorithm preserves DOM node identity when it should (e.g.
+same-key nodes that moved position should reuse the same DOM element).
+-}
+isDomSameNode : Container -> Container -> Bool
+isDomSameNode =
+    DiffTestHelperFFI.isDomSameNode
+
+
+{-| Get the tag name of the rendered root element (the container's first child).
+Returns Nothing if the container is empty or the root is a text node.
+Tag names are returned lowercase (e.g. "div", "p", "span").
+-}
+getRootTag : Container -> Maybe String
+getRootTag =
+    DiffTestHelperFFI.getRootTag
+
+
+{-| Get the text content of the rendered root element. Returns empty string
+if the container is empty.
+-}
+getRootText : Container -> String
+getRootText =
+    DiffTestHelperFFI.getRootText

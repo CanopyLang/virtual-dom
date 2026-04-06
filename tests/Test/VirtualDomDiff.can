@@ -1,0 +1,1619 @@
+module Test.VirtualDomDiff exposing (main)
+
+{-| Comprehensive browser test suite for the VirtualDom diff/patch algorithm.
+
+Tests render vnodes to real DOM, apply diff/patch updates via the runtime's
+\_VirtualDom\_update function, then inspect the resulting DOM to verify
+correctness. Covers text updates, element redraw, attribute/style/property
+patching, non-keyed child reconciliation, keyed node fast paths, keyed
+reordering via longest-increasing-subsequence, lazy thunks, tagger (map)
+nodes, and SVG namespace handling.
+-}
+
+import Basics exposing (..)
+import VirtualDom
+import Json.Encode as Encode
+import Maybe exposing (Maybe(..), map2)
+import String
+import DiffTestHelper exposing
+    ( Container
+    , renderToContainer
+    , updateInContainer
+    , getChildCount
+    , getChildTag
+    , getChildText
+    , getTextContent
+    , getInnerHTML
+    , getDomAttribute
+    , getDomProperty
+    , getDomStyle
+    , getChildAtPath
+    , isDomSameNode
+    , getRootTag
+    , getRootText
+    )
+import Test exposing (BrowserTest, Test, describe, test, inBrowser)
+import Expect
+
+
+
+-- MAIN
+
+
+main : BrowserTest
+main =
+    inBrowser
+        [ coreDispatchTests
+        , textUpdateTests
+        , thunkTests
+        , taggerTests
+        , factsDiffTests
+        , namespaceTests
+        , nonKeyedKidsTests
+        , keyedFastPathTests
+        , keyedLISReorderTests
+        ]
+
+
+
+-- HELPERS
+
+
+div : List (VirtualDom.Attribute msg) -> List (VirtualDom.Node msg) -> VirtualDom.Node msg
+div =
+    VirtualDom.node "div"
+
+
+span : List (VirtualDom.Attribute msg) -> List (VirtualDom.Node msg) -> VirtualDom.Node msg
+span =
+    VirtualDom.node "span"
+
+
+input : List (VirtualDom.Attribute msg) -> List (VirtualDom.Node msg) -> VirtualDom.Node msg
+input =
+    VirtualDom.node "input"
+
+
+text : String -> VirtualDom.Node msg
+text =
+    VirtualDom.text
+
+
+keyedDiv : List (VirtualDom.Attribute msg) -> List ( String, VirtualDom.Node msg ) -> VirtualDom.Node msg
+keyedDiv =
+    VirtualDom.keyedNode "div"
+
+
+
+-- 1. CORE DISPATCH
+
+
+coreDispatchTests : Test
+coreDispatchTests =
+    describe "Core dispatch"
+        [ test "same reference produces no DOM change" <| \_ ->
+            let
+                vnode =
+                    div [] [ text "stable" ]
+
+                container =
+                    renderToContainer vnode
+
+                htmlBefore =
+                    getInnerHTML container
+
+                updated =
+                    updateInContainer container vnode vnode
+            in
+            getInnerHTML updated
+                |> Expect.equal htmlBefore
+
+        , test "text to element triggers redraw" <| \_ ->
+            let
+                oldNode =
+                    text "hello"
+
+                newNode =
+                    div [] []
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getRootTag updated
+                |> Expect.equal (Just "div")
+
+        , test "element to text triggers redraw" <| \_ ->
+            let
+                oldNode =
+                    div [] []
+
+                newNode =
+                    text "hello"
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getRootText updated
+                |> Expect.equal "hello"
+
+        , test "different tag triggers redraw" <| \_ ->
+            let
+                oldNode =
+                    div [] []
+
+                newNode =
+                    span [] []
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getRootTag updated
+                |> Expect.equal (Just "span")
+
+        , test "node to keyed node works" <| \_ ->
+            let
+                oldNode =
+                    div [] [ text "a", text "b" ]
+
+                newNode =
+                    keyedDiv [] [ ( "a", text "a" ), ( "b", text "b" ) ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getChildCount updated
+                |> Expect.equal 2
+
+        , test "empty node to empty node is noop" <| \_ ->
+            let
+                oldNode =
+                    div [] []
+
+                newNode =
+                    div [] []
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getInnerHTML updated
+                |> Expect.equal ""
+
+        , test "deeply nested update" <| \_ ->
+            let
+                oldNode =
+                    div []
+                        [ div []
+                            [ span [] [ text "old" ] ]
+                        ]
+
+                newNode =
+                    div []
+                        [ div []
+                            [ span [] [ text "new" ] ]
+                        ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getTextContent updated
+                |> Expect.equal "new"
+
+        , test "complete tree replacement" <| \_ ->
+            let
+                oldNode =
+                    div []
+                        [ span [] [ text "a" ]
+                        , span [] [ text "b" ]
+                        ]
+
+                newNode =
+                    div []
+                        [ VirtualDom.node "p" [] [ text "x" ]
+                        , VirtualDom.node "h1" [] [ text "y" ]
+                        , VirtualDom.node "h2" [] [ text "z" ]
+                        ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            Expect.all
+                [ \c -> getChildCount c |> Expect.equal 3
+                , \c -> getChildTag c 0 |> Expect.equal (Just "p")
+                , \c -> getChildTag c 1 |> Expect.equal (Just "h1")
+                , \c -> getChildTag c 2 |> Expect.equal (Just "h2")
+                ]
+                updated
+        ]
+
+
+
+-- 2. TEXT UPDATE
+
+
+textUpdateTests : Test
+textUpdateTests =
+    describe "Text update"
+        [ test "text content changed" <| \_ ->
+            let
+                oldNode =
+                    text "hello"
+
+                newNode =
+                    text "world"
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getRootText updated
+                |> Expect.equal "world"
+
+        , test "text unchanged is noop" <| \_ ->
+            let
+                oldNode =
+                    text "same"
+
+                newNode =
+                    text "same"
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getRootText updated
+                |> Expect.equal "same"
+
+        , test "text empty to content" <| \_ ->
+            let
+                oldNode =
+                    text ""
+
+                newNode =
+                    text "content"
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getRootText updated
+                |> Expect.equal "content"
+
+        , test "text content to empty" <| \_ ->
+            let
+                oldNode =
+                    text "content"
+
+                newNode =
+                    text ""
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getRootText updated
+                |> Expect.equal ""
+
+        , test "text with special HTML chars" <| \_ ->
+            let
+                oldNode =
+                    text "<b>bold</b>"
+
+                newNode =
+                    text "<i>italic</i>"
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getRootText updated
+                |> Expect.equal "<i>italic</i>"
+
+        , test "text with unicode" <| \_ ->
+            let
+                oldNode =
+                    text "Hello \u{1F30D}"
+
+                newNode =
+                    text "Goodbye \u{1F30E}"
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getRootText updated
+                |> Expect.equal "Goodbye \u{1F30E}"
+        ]
+
+
+
+-- 3. THUNK (LAZY)
+
+
+thunkTests : Test
+thunkTests =
+    describe "Thunk (lazy)"
+        [ test "lazy same function same arg skips re-render" <| \_ ->
+            let
+                fn =
+                    \x -> div [] [ text x ]
+
+                arg =
+                    "stable"
+
+                oldNode =
+                    VirtualDom.lazy fn arg
+
+                container =
+                    renderToContainer oldNode
+
+                htmlBefore =
+                    getInnerHTML container
+
+                updated =
+                    updateInContainer container oldNode (VirtualDom.lazy fn arg)
+            in
+            getInnerHTML updated
+                |> Expect.equal htmlBefore
+
+        , test "lazy different arg forces re-render" <| \_ ->
+            let
+                fn =
+                    \x -> div [] [ text x ]
+
+                oldNode =
+                    VirtualDom.lazy fn "old"
+
+                newNode =
+                    VirtualDom.lazy fn "new"
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getTextContent updated
+                |> Expect.equal "new"
+
+        , test "lazy forces correct result" <| \_ ->
+            let
+                oldNode =
+                    VirtualDom.lazy (\x -> text x) "hello"
+
+                container =
+                    renderToContainer oldNode
+            in
+            getRootText container
+                |> Expect.equal "hello"
+
+        , test "lazy2 both args same skips" <| \_ ->
+            let
+                fn =
+                    \a b -> div [] [ text (String.append a b) ]
+
+                argA =
+                    "hello"
+
+                argB =
+                    "world"
+
+                oldNode =
+                    VirtualDom.lazy2 fn argA argB
+
+                container =
+                    renderToContainer oldNode
+
+                htmlBefore =
+                    getInnerHTML container
+
+                updated =
+                    updateInContainer container oldNode (VirtualDom.lazy2 fn argA argB)
+            in
+            getInnerHTML updated
+                |> Expect.equal htmlBefore
+
+        , test "lazy2 one arg changed forces" <| \_ ->
+            let
+                fn =
+                    \a b -> div [] [ text (String.append a b) ]
+
+                oldNode =
+                    VirtualDom.lazy2 fn "hello" "world"
+
+                newNode =
+                    VirtualDom.lazy2 fn "hello" "there"
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getTextContent updated
+                |> Expect.equal "hellothere"
+
+        , test "lazy produces correct tag" <| \_ ->
+            let
+                oldNode =
+                    VirtualDom.lazy (\_ -> div [] []) 0
+
+                container =
+                    renderToContainer oldNode
+            in
+            getRootTag container
+                |> Expect.equal (Just "div")
+
+        , test "lazy wrapping input preserves properties" <| \_ ->
+            let
+                oldNode =
+                    VirtualDom.lazy
+                        (\val ->
+                            input
+                                [ VirtualDom.property "value" (Encode.string val) ]
+                                []
+                        )
+                        "test-value"
+
+                container =
+                    renderToContainer oldNode
+            in
+            getDomProperty container "value"
+                |> Expect.equal (Just "test-value")
+
+        , test "nested lazy nodes" <| \_ ->
+            let
+                innerFn =
+                    \x -> text x
+
+                outerFn =
+                    \x -> div [] [ VirtualDom.lazy innerFn x ]
+
+                oldNode =
+                    VirtualDom.lazy outerFn "inner-text"
+
+                container =
+                    renderToContainer oldNode
+            in
+            getTextContent container
+                |> Expect.equal "inner-text"
+        ]
+
+
+
+-- 4. TAGGER (MAP)
+
+
+taggerTests : Test
+taggerTests =
+    describe "Tagger (map)"
+        [ test "map with changed inner node updates DOM" <| \_ ->
+            let
+                oldNode =
+                    VirtualDom.map identity (text "old")
+
+                newNode =
+                    VirtualDom.map identity (text "new")
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getRootText updated
+                |> Expect.equal "new"
+
+        , test "map preserves node structure" <| \_ ->
+            let
+                oldNode =
+                    VirtualDom.map identity
+                        (div [] [ text "a", text "b" ])
+
+                newNode =
+                    VirtualDom.map identity
+                        (div [] [ text "x", text "y" ])
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            Expect.all
+                [ \c -> getChildCount c |> Expect.equal 2
+                , \c -> getChildText c 0 |> Expect.equal (Just "x")
+                , \c -> getChildText c 1 |> Expect.equal (Just "y")
+                ]
+                updated
+
+        , test "map over keyed node" <| \_ ->
+            let
+                oldNode =
+                    VirtualDom.map identity
+                        (keyedDiv [] [ ( "a", text "alpha" ) ])
+
+                newNode =
+                    VirtualDom.map identity
+                        (keyedDiv [] [ ( "a", text "alpha" ), ( "b", text "beta" ) ])
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getChildCount updated
+                |> Expect.equal 2
+
+        , test "map with attributes" <| \_ ->
+            let
+                oldNode =
+                    VirtualDom.map identity
+                        (div [ VirtualDom.attribute "id" "old-id" ] [])
+
+                newNode =
+                    VirtualDom.map identity
+                        (div [ VirtualDom.attribute "id" "new-id" ] [])
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getDomAttribute updated "id"
+                |> Expect.equal (Just "new-id")
+
+        , test "nested map" <| \_ ->
+            let
+                oldNode =
+                    VirtualDom.map identity
+                        (VirtualDom.map identity (text "inner"))
+
+                container =
+                    renderToContainer oldNode
+            in
+            getRootText container
+                |> Expect.equal "inner"
+        ]
+
+
+
+-- 5. FACTS DIFF (ATTRIBUTES, STYLES, PROPERTIES)
+
+
+factsDiffTests : Test
+factsDiffTests =
+    describe "Facts diff"
+        [ test "attribute added" <| \_ ->
+            let
+                oldNode =
+                    div [] []
+
+                newNode =
+                    div [ VirtualDom.attribute "id" "test" ] []
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getDomAttribute updated "id"
+                |> Expect.equal (Just "test")
+
+        , test "attribute removed" <| \_ ->
+            let
+                oldNode =
+                    div [ VirtualDom.attribute "id" "test" ] []
+
+                newNode =
+                    div [] []
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getDomAttribute updated "id"
+                |> Expect.equal Nothing
+
+        , test "attribute changed" <| \_ ->
+            let
+                oldNode =
+                    div [ VirtualDom.attribute "id" "old" ] []
+
+                newNode =
+                    div [ VirtualDom.attribute "id" "new" ] []
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getDomAttribute updated "id"
+                |> Expect.equal (Just "new")
+
+        , test "attribute unchanged" <| \_ ->
+            let
+                oldNode =
+                    div [ VirtualDom.attribute "id" "same" ] []
+
+                newNode =
+                    div [ VirtualDom.attribute "id" "same" ] []
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getDomAttribute updated "id"
+                |> Expect.equal (Just "same")
+
+        , test "style added" <| \_ ->
+            let
+                oldNode =
+                    div [] []
+
+                newNode =
+                    div [ VirtualDom.style "color" "red" ] []
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getDomStyle updated "color"
+                |> Expect.equal (Just "red")
+
+        , test "style removed" <| \_ ->
+            let
+                oldNode =
+                    div [ VirtualDom.style "color" "red" ] []
+
+                newNode =
+                    div [] []
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getDomStyle updated "color"
+                |> Expect.equal Nothing
+
+        , test "style changed" <| \_ ->
+            let
+                oldNode =
+                    div [ VirtualDom.style "color" "red" ] []
+
+                newNode =
+                    div [ VirtualDom.style "color" "blue" ] []
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getDomStyle updated "color"
+                |> Expect.equal (Just "blue")
+
+        , test "property set" <| \_ ->
+            let
+                oldNode =
+                    input
+                        [ VirtualDom.property "value" (Encode.string "hello") ]
+                        []
+
+                newNode =
+                    input
+                        [ VirtualDom.property "value" (Encode.string "world") ]
+                        []
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getDomProperty updated "value"
+                |> Expect.equal (Just "world")
+
+        , test "class attribute changed" <| \_ ->
+            let
+                oldNode =
+                    div [ VirtualDom.attribute "class" "foo" ] []
+
+                newNode =
+                    div [ VirtualDom.attribute "class" "bar" ] []
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getDomAttribute updated "class"
+                |> Expect.equal (Just "bar")
+
+        , test "multiple attributes changed" <| \_ ->
+            let
+                oldNode =
+                    div
+                        [ VirtualDom.attribute "id" "a"
+                        , VirtualDom.attribute "class" "b"
+                        , VirtualDom.attribute "data-x" "c"
+                        ]
+                        []
+
+                newNode =
+                    div
+                        [ VirtualDom.attribute "id" "x"
+                        , VirtualDom.attribute "class" "y"
+                        , VirtualDom.attribute "data-x" "z"
+                        ]
+                        []
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            Expect.all
+                [ \c -> getDomAttribute c "id" |> Expect.equal (Just "x")
+                , \c -> getDomAttribute c "class" |> Expect.equal (Just "y")
+                , \c -> getDomAttribute c "data-x" |> Expect.equal (Just "z")
+                ]
+                updated
+
+        , test "mixed facts update" <| \_ ->
+            let
+                oldNode =
+                    div
+                        [ VirtualDom.style "color" "red"
+                        , VirtualDom.attribute "data-v" "1"
+                        ]
+                        []
+
+                newNode =
+                    div
+                        [ VirtualDom.style "color" "blue"
+                        , VirtualDom.attribute "data-v" "2"
+                        ]
+                        []
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            Expect.all
+                [ \c -> getDomStyle c "color" |> Expect.equal (Just "blue")
+                , \c -> getDomAttribute c "data-v" |> Expect.equal (Just "2")
+                ]
+                updated
+
+        , test "tag change with same attributes triggers redraw" <| \_ ->
+            let
+                oldNode =
+                    div [ VirtualDom.attribute "id" "x" ] []
+
+                newNode =
+                    span [ VirtualDom.attribute "id" "x" ] []
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            Expect.all
+                [ \c -> getRootTag c |> Expect.equal (Just "span")
+                , \c -> getDomAttribute c "id" |> Expect.equal (Just "x")
+                ]
+                updated
+        ]
+
+
+
+-- 6. NAMESPACE
+
+
+namespaceTests : Test
+namespaceTests =
+    describe "Namespace"
+        [ test "SVG namespace preserved during update" <| \_ ->
+            let
+                svgNS =
+                    "http://www.w3.org/2000/svg"
+
+                oldNode =
+                    VirtualDom.nodeNS svgNS "circle"
+                        [ VirtualDom.attribute "r" "5" ]
+                        []
+
+                newNode =
+                    VirtualDom.nodeNS svgNS "circle"
+                        [ VirtualDom.attribute "r" "10" ]
+                        []
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getDomAttribute updated "r"
+                |> Expect.equal (Just "10")
+
+        , test "namespace change triggers redraw" <| \_ ->
+            let
+                svgNS =
+                    "http://www.w3.org/2000/svg"
+
+                oldNode =
+                    VirtualDom.nodeNS svgNS "circle"
+                        [ VirtualDom.attribute "r" "5" ]
+                        []
+
+                newNode =
+                    div [] []
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getRootTag updated
+                |> Expect.equal (Just "div")
+
+        , test "SVG with updated attributes" <| \_ ->
+            let
+                svgNS =
+                    "http://www.w3.org/2000/svg"
+
+                oldNode =
+                    VirtualDom.nodeNS svgNS "path"
+                        [ VirtualDom.attribute "d" "M0 0" ]
+                        []
+
+                newNode =
+                    VirtualDom.nodeNS svgNS "path"
+                        [ VirtualDom.attribute "d" "M10 10" ]
+                        []
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getDomAttribute updated "d"
+                |> Expect.equal (Just "M10 10")
+        ]
+
+
+
+-- 7. NON-KEYED KIDS
+
+
+nonKeyedKidsTests : Test
+nonKeyedKidsTests =
+    describe "Non-keyed kids"
+        [ test "clear all children" <| \_ ->
+            let
+                oldNode =
+                    div [] [ text "a", text "b", text "c" ]
+
+                newNode =
+                    div [] []
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getChildCount updated
+                |> Expect.equal 0
+
+        , test "same count update content" <| \_ ->
+            let
+                oldNode =
+                    div [] [ text "a", text "b" ]
+
+                newNode =
+                    div [] [ text "x", text "y" ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            Expect.all
+                [ \c -> getChildText c 0 |> Expect.equal (Just "x")
+                , \c -> getChildText c 1 |> Expect.equal (Just "y")
+                ]
+                updated
+
+        , test "same count change types" <| \_ ->
+            let
+                oldNode =
+                    div [] [ text "a" ]
+
+                newNode =
+                    div [] [ span [] [] ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getChildTag updated 0
+                |> Expect.equal (Just "span")
+
+        , test "append one child" <| \_ ->
+            let
+                oldNode =
+                    div [] [ text "a" ]
+
+                newNode =
+                    div [] [ text "a", text "b" ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            Expect.all
+                [ \c -> getChildCount c |> Expect.equal 2
+                , \c -> getChildText c 1 |> Expect.equal (Just "b")
+                ]
+                updated
+
+        , test "append many children" <| \_ ->
+            let
+                oldNode =
+                    div [] [ text "a" ]
+
+                newNode =
+                    div [] [ text "a", text "b", text "c", text "d" ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getChildCount updated
+                |> Expect.equal 4
+
+        , test "remove last child" <| \_ ->
+            let
+                oldNode =
+                    div [] [ text "a", text "b" ]
+
+                newNode =
+                    div [] [ text "a" ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getChildCount updated
+                |> Expect.equal 1
+
+        , test "remove multiple children" <| \_ ->
+            let
+                oldNode =
+                    div [] [ text "a", text "b", text "c", text "d" ]
+
+                newNode =
+                    div [] [ text "a" ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getChildCount updated
+                |> Expect.equal 1
+
+        , test "shrink and update" <| \_ ->
+            let
+                oldNode =
+                    div [] [ text "a", text "b", text "c" ]
+
+                newNode =
+                    div [] [ text "x", text "y" ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            Expect.all
+                [ \c -> getChildCount c |> Expect.equal 2
+                , \c -> getChildText c 0 |> Expect.equal (Just "x")
+                , \c -> getChildText c 1 |> Expect.equal (Just "y")
+                ]
+                updated
+
+        , test "grow and update" <| \_ ->
+            let
+                oldNode =
+                    div [] [ text "a" ]
+
+                newNode =
+                    div [] [ text "x", text "y", text "z" ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            Expect.all
+                [ \c -> getChildCount c |> Expect.equal 3
+                , \c -> getChildText c 0 |> Expect.equal (Just "x")
+                , \c -> getChildText c 1 |> Expect.equal (Just "y")
+                , \c -> getChildText c 2 |> Expect.equal (Just "z")
+                ]
+                updated
+
+        , test "empty to many" <| \_ ->
+            let
+                oldNode =
+                    div [] []
+
+                newNode =
+                    div [] [ text "a", text "b", text "c" ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getChildCount updated
+                |> Expect.equal 3
+        ]
+
+
+
+-- 8. KEYED FAST PATH
+
+
+keyedFastPathTests : Test
+keyedFastPathTests =
+    describe "Keyed fast path"
+        [ test "keyed clear all" <| \_ ->
+            let
+                oldNode =
+                    keyedDiv []
+                        [ ( "a", text "a" )
+                        , ( "b", text "b" )
+                        , ( "c", text "c" )
+                        ]
+
+                newNode =
+                    keyedDiv [] []
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getChildCount updated
+                |> Expect.equal 0
+
+        , test "keyed empty to many" <| \_ ->
+            let
+                oldNode =
+                    keyedDiv [] []
+
+                newNode =
+                    keyedDiv []
+                        [ ( "a", text "a" )
+                        , ( "b", text "b" )
+                        , ( "c", text "c" )
+                        ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getChildCount updated
+                |> Expect.equal 3
+
+        , test "keyed pure append" <| \_ ->
+            let
+                oldNode =
+                    keyedDiv []
+                        [ ( "a", text "alpha" ) ]
+
+                newNode =
+                    keyedDiv []
+                        [ ( "a", text "alpha" )
+                        , ( "b", text "beta" )
+                        ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            Expect.all
+                [ \c -> getChildCount c |> Expect.equal 2
+                , \c -> getChildText c 1 |> Expect.equal (Just "beta")
+                ]
+                updated
+
+        , test "keyed same order update" <| \_ ->
+            let
+                oldNode =
+                    keyedDiv []
+                        [ ( "a", text "old" ) ]
+
+                newNode =
+                    keyedDiv []
+                        [ ( "a", text "new" ) ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getChildText updated 0
+                |> Expect.equal (Just "new")
+
+        , test "keyed remove from end" <| \_ ->
+            let
+                oldNode =
+                    keyedDiv []
+                        [ ( "a", text "a" )
+                        , ( "b", text "b" )
+                        ]
+
+                newNode =
+                    keyedDiv []
+                        [ ( "a", text "a" ) ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getChildCount updated
+                |> Expect.equal 1
+
+        , test "keyed remove from middle" <| \_ ->
+            let
+                oldNode =
+                    keyedDiv []
+                        [ ( "a", text "alpha" )
+                        , ( "b", text "beta" )
+                        , ( "c", text "gamma" )
+                        ]
+
+                newNode =
+                    keyedDiv []
+                        [ ( "a", text "alpha" )
+                        , ( "c", text "gamma" )
+                        ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            Expect.all
+                [ \c -> getChildCount c |> Expect.equal 2
+                , \c -> getChildText c 0 |> Expect.equal (Just "alpha")
+                , \c -> getChildText c 1 |> Expect.equal (Just "gamma")
+                ]
+                updated
+
+        , test "keyed prepend" <| \_ ->
+            let
+                oldNode =
+                    keyedDiv []
+                        [ ( "b", text "beta" ) ]
+
+                newNode =
+                    keyedDiv []
+                        [ ( "a", text "alpha" )
+                        , ( "b", text "beta" )
+                        ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            Expect.all
+                [ \c -> getChildCount c |> Expect.equal 2
+                , \c -> getChildText c 0 |> Expect.equal (Just "alpha")
+                ]
+                updated
+
+        , test "keyed insert in middle" <| \_ ->
+            let
+                oldNode =
+                    keyedDiv []
+                        [ ( "a", text "alpha" )
+                        , ( "c", text "gamma" )
+                        ]
+
+                newNode =
+                    keyedDiv []
+                        [ ( "a", text "alpha" )
+                        , ( "b", text "beta" )
+                        , ( "c", text "gamma" )
+                        ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            Expect.all
+                [ \c -> getChildCount c |> Expect.equal 3
+                , \c -> getChildText c 1 |> Expect.equal (Just "beta")
+                ]
+                updated
+
+        , test "keyed full replace" <| \_ ->
+            let
+                oldNode =
+                    keyedDiv []
+                        [ ( "a", text "alpha" )
+                        , ( "b", text "beta" )
+                        ]
+
+                newNode =
+                    keyedDiv []
+                        [ ( "x", text "xray" )
+                        , ( "y", text "yankee" )
+                        ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            Expect.all
+                [ \c -> getChildCount c |> Expect.equal 2
+                , \c -> getChildText c 0 |> Expect.equal (Just "xray")
+                , \c -> getChildText c 1 |> Expect.equal (Just "yankee")
+                ]
+                updated
+
+        , test "keyed single to empty" <| \_ ->
+            let
+                oldNode =
+                    keyedDiv []
+                        [ ( "a", text "alpha" ) ]
+
+                newNode =
+                    keyedDiv [] []
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            getChildCount updated
+                |> Expect.equal 0
+        ]
+
+
+
+-- 9. KEYED LIS REORDER
+
+
+keyedLISReorderTests : Test
+keyedLISReorderTests =
+    describe "Keyed LIS reorder"
+        [ test "keyed reverse order" <| \_ ->
+            let
+                oldNode =
+                    keyedDiv []
+                        [ ( "a", text "alpha" )
+                        , ( "b", text "beta" )
+                        , ( "c", text "gamma" )
+                        ]
+
+                newNode =
+                    keyedDiv []
+                        [ ( "c", text "gamma" )
+                        , ( "b", text "beta" )
+                        , ( "a", text "alpha" )
+                        ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            Expect.all
+                [ \c -> getChildText c 0 |> Expect.equal (Just "gamma")
+                , \c -> getChildText c 1 |> Expect.equal (Just "beta")
+                , \c -> getChildText c 2 |> Expect.equal (Just "alpha")
+                ]
+                updated
+
+        , test "keyed swap adjacent" <| \_ ->
+            let
+                oldNode =
+                    keyedDiv []
+                        [ ( "a", text "alpha" )
+                        , ( "b", text "beta" )
+                        , ( "c", text "gamma" )
+                        ]
+
+                newNode =
+                    keyedDiv []
+                        [ ( "b", text "beta" )
+                        , ( "a", text "alpha" )
+                        , ( "c", text "gamma" )
+                        ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            Expect.all
+                [ \c -> getChildText c 0 |> Expect.equal (Just "beta")
+                , \c -> getChildText c 1 |> Expect.equal (Just "alpha")
+                , \c -> getChildText c 2 |> Expect.equal (Just "gamma")
+                ]
+                updated
+
+        , test "keyed move first to last" <| \_ ->
+            let
+                oldNode =
+                    keyedDiv []
+                        [ ( "a", text "alpha" )
+                        , ( "b", text "beta" )
+                        , ( "c", text "gamma" )
+                        ]
+
+                newNode =
+                    keyedDiv []
+                        [ ( "b", text "beta" )
+                        , ( "c", text "gamma" )
+                        , ( "a", text "alpha" )
+                        ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            Expect.all
+                [ \c -> getChildText c 0 |> Expect.equal (Just "beta")
+                , \c -> getChildText c 1 |> Expect.equal (Just "gamma")
+                , \c -> getChildText c 2 |> Expect.equal (Just "alpha")
+                ]
+                updated
+
+        , test "keyed move last to first" <| \_ ->
+            let
+                oldNode =
+                    keyedDiv []
+                        [ ( "a", text "alpha" )
+                        , ( "b", text "beta" )
+                        , ( "c", text "gamma" )
+                        ]
+
+                newNode =
+                    keyedDiv []
+                        [ ( "c", text "gamma" )
+                        , ( "a", text "alpha" )
+                        , ( "b", text "beta" )
+                        ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            Expect.all
+                [ \c -> getChildText c 0 |> Expect.equal (Just "gamma")
+                , \c -> getChildText c 1 |> Expect.equal (Just "alpha")
+                , \c -> getChildText c 2 |> Expect.equal (Just "beta")
+                ]
+                updated
+
+        , test "keyed interleave new items" <| \_ ->
+            let
+                oldNode =
+                    keyedDiv []
+                        [ ( "a", text "alpha" )
+                        , ( "c", text "gamma" )
+                        ]
+
+                newNode =
+                    keyedDiv []
+                        [ ( "a", text "alpha" )
+                        , ( "b", text "beta" )
+                        , ( "c", text "gamma" )
+                        , ( "d", text "delta" )
+                        ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            Expect.all
+                [ \c -> getChildCount c |> Expect.equal 4
+                , \c -> getChildText c 0 |> Expect.equal (Just "alpha")
+                , \c -> getChildText c 1 |> Expect.equal (Just "beta")
+                , \c -> getChildText c 2 |> Expect.equal (Just "gamma")
+                , \c -> getChildText c 3 |> Expect.equal (Just "delta")
+                ]
+                updated
+
+        , test "keyed partial overlap" <| \_ ->
+            let
+                oldNode =
+                    keyedDiv []
+                        [ ( "a", text "alpha" )
+                        , ( "b", text "beta" )
+                        , ( "c", text "gamma" )
+                        ]
+
+                newNode =
+                    keyedDiv []
+                        [ ( "b", text "beta" )
+                        , ( "d", text "delta" )
+                        , ( "c", text "gamma" )
+                        ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            Expect.all
+                [ \c -> getChildCount c |> Expect.equal 3
+                , \c -> getChildText c 0 |> Expect.equal (Just "beta")
+                , \c -> getChildText c 1 |> Expect.equal (Just "delta")
+                , \c -> getChildText c 2 |> Expect.equal (Just "gamma")
+                ]
+                updated
+
+        , test "keyed DOM node identity preserved on reorder" <| \_ ->
+            let
+                oldNode =
+                    keyedDiv []
+                        [ ( "a", div [ VirtualDom.attribute "id" "el-a" ] [] )
+                        , ( "b", div [ VirtualDom.attribute "id" "el-b" ] [] )
+                        ]
+
+                container =
+                    renderToContainer oldNode
+
+                refBefore =
+                    getChildAtPath container [ 0 ]
+
+                newNode =
+                    keyedDiv []
+                        [ ( "b", div [ VirtualDom.attribute "id" "el-b" ] [] )
+                        , ( "a", div [ VirtualDom.attribute "id" "el-a" ] [] )
+                        ]
+
+                updated =
+                    updateInContainer container oldNode newNode
+
+                refAfter =
+                    getChildAtPath updated [ 1 ]
+            in
+            map2 isDomSameNode refBefore refAfter
+                |> Expect.equal (Just True)
+
+        , test "keyed large reorder" <| \_ ->
+            let
+                oldNode =
+                    keyedDiv []
+                        [ ( "a", text "alpha" )
+                        , ( "b", text "beta" )
+                        , ( "c", text "gamma" )
+                        , ( "d", text "delta" )
+                        , ( "e", text "epsilon" )
+                        ]
+
+                newNode =
+                    keyedDiv []
+                        [ ( "e", text "epsilon" )
+                        , ( "c", text "gamma" )
+                        , ( "a", text "alpha" )
+                        , ( "d", text "delta" )
+                        , ( "b", text "beta" )
+                        ]
+
+                container =
+                    renderToContainer oldNode
+
+                updated =
+                    updateInContainer container oldNode newNode
+            in
+            Expect.all
+                [ \c -> getChildCount c |> Expect.equal 5
+                , \c -> getChildText c 0 |> Expect.equal (Just "epsilon")
+                , \c -> getChildText c 1 |> Expect.equal (Just "gamma")
+                , \c -> getChildText c 2 |> Expect.equal (Just "alpha")
+                , \c -> getChildText c 3 |> Expect.equal (Just "delta")
+                , \c -> getChildText c 4 |> Expect.equal (Just "beta")
+                ]
+                updated
+        ]
