@@ -1,0 +1,4 @@
+canopy-stuff/
+output/
+*.elco
+artifacts.dat
